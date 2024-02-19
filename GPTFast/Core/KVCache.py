@@ -51,7 +51,7 @@ class KVCacheModel(nn.Module):
     def _generate_with_kvcache(self,prefix:torch.Tensor, 
                                     gamma:int, 
                                     sample:Callable,
-                                    use_debug = False, **sampling_kwargs) -> torch.Tensor:
+                                    **sampling_kwargs) -> torch.Tensor:
         """ forward the model gamma times
 
         Args:
@@ -63,10 +63,17 @@ class KVCacheModel(nn.Module):
         """
         x = prefix
 
+        #prefill stage
+        q = self.prefill(x)
+        next_tok = sample(q, **sampling_kwargs)
+        x = torch.cat((x, next_tok), dim=1)
+
         for _ in range(gamma):
-            q = self.forward(x, use_debug)
+            q = self.forward(x)
             next_tok = sample(q, **sampling_kwargs)
             x = torch.cat((x, next_tok), dim=1)
+        
+        self.clear()
         return x
 
     def decode_function(self, input_ids:torch.Tensor, length:int, return_text:bool=True) -> torch.Tensor:

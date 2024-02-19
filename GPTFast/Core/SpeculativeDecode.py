@@ -137,6 +137,7 @@ def generate(self, cur_tokens:torch.Tensor, max_tokens:int, speculate_k:int, **s
 
 def generate_kv_cache(self, cur_tokens:torch.Tensor, max_tokens:int, speculate_k:int, **sampling_kwargs) -> torch.Tensor:
     assert isinstance(self, KVCacheModel), "Your model must be a KVCache model for this to work."
+    assert isinstance(self.draft_model, KVCacheModel), "Your draft model must be a KVCache model for this to work."
     
     assert len(cur_tokens.shape) == 2 and cur_tokens.shape[0] == 1, "Your batch size must be 1"
 
@@ -147,6 +148,7 @@ def generate_kv_cache(self, cur_tokens:torch.Tensor, max_tokens:int, speculate_k
     #prefill phase
     self.draft_model.prefill(cur_tokens)
     next_q = self.prefill(cur_tokens)
+
     next_token = torch.Tensor([self.sample(next_q[-1], **sampling_kwargs)]).to(device) 
     cur_tokens = torch.cat((cur_tokens, next_token.unsqueeze(0)), dim=-1).to(torch.long)
 
