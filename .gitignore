@@ -1,2 +1,5 @@
 deploy.ps1
 __pycache__
+build
+dist
+gptfast.egg-info
