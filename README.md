@@ -1,2 +1,2 @@
 # GPTFast
-Accelerate your Huggingface Transformers 6-7x with GPTFast
+Accelerate your Hugging face Transformers 6-7x with GPTFast
