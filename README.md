@@ -56,7 +56,7 @@ GPTFast Inference Time|Eager Inference Time
       print(f"gpt fast eval time {i}: {compile_time}")
   print("~" * 10)
   ```
-  * Run it and watch the magic 🪄!
+* Run it and watch the magic 🪄!
 
 # Documentation
 At its core, this library provides a simple interface to LLM Inference acceleration techniques. All of the following functions can be imported from ```GPTFast.core```:
