@@ -59,7 +59,7 @@ GPTFast Inference Time|Eager Inference Time
 * Run it and watch the magic 🪄!
 
 # Documentation
-At its core, this library provides a simple interface to LLM Inference acceleration techniques. All of the following functions can be imported from ```GPTFast.core```:
+At its core, this library provides a simple interface to LLM Inference acceleration techniques. All of the following functions can be imported from ```GPTFast.Core```:
 
 * ```gpt_fast(model_name:str, draft_model_name:str, sample_function:Callable) -> torch.nn.Module```
   * **Parameters**:
