@@ -44,10 +44,7 @@ GPTFast Inference Time|Eager Inference Time
   
   N_ITERS=10
   MAX_TOKENS=50
-  
-  attention_mask = torch.ones(input_tokens.shape, dtype=torch.long).to(device)
-  pad_token_id = 50256
-  
+
   gpt_fast_model = gpt_fast(model_name, draft_model_name=draft_model_name, sample_function=argmax)
   gpt_fast_model.to(device)
   
