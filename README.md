@@ -14,7 +14,7 @@ GPTFast Inference Time|Eager Inference Time
 * Make a virtual environment on your machine and activate it.
   ```bash
   $python3 -m venv VENV_NAME
-  source VENV_NAME/bin/activate #./VENV_NAME/scripts/activate if you are on a Windows machine
+  source VENV_NAME/bin/activate #./VENV_NAME/scripts/activate if you are on Windows
   ```
 * Call the following: ```pip install gptfast```
 * Copy the following code into a python file:
