@@ -1,6 +1,6 @@
 import os
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 from GPTFast.Core import gpt_fast
 from GPTFast.Helpers import timed
 
@@ -31,7 +31,7 @@ def argmax_variation(self, probabilities:torch.Tensor, temperature:float = 1, k:
 def argmax(self, probabilities):
     # Use argmax to get the token with the maximum probability
     max_prob_index = torch.argmax(probabilities, dim=-1)
-    return max_prob_index.unsqueeze(0)
+    return max_prob_index.view(1, 1)
 
 model_name = "gpt2-xl"
 draft_model_name = "gpt2"
@@ -43,23 +43,32 @@ input_tokens = tokenizer.encode(initial_string, return_tensors="pt").to(device)
 N_ITERS=10
 MAX_TOKENS=50
 
-attention_mask = torch.ones(input_tokens.shape, dtype=torch.long).to(device)
-pad_token_id = 50256
+cache_config = {
+    "path_to_blocks": ["transformer", "h"],
+    "child_ref_in_parent_forward": ["transformer", "block"],
+    "attn_ref_in_block_forward": "attn",
+    "attention_name": "attn",
+    "kv_cache_condition":"layer_past is not None",
+    "causal_mask_location": "_attn",
+    "causal_mask_condition": "not self.is_cross_attention",
+    "key_name": "key",
+    "value_name": "value",
+    "imports": ["import torch", 
+                "import transformers", 
+                "from transformers import *", 
+                "from torch import *", 
+                "from typing import *", 
+                "import types", 
+                "from transformers.modeling_outputs import *", 
+                "from torch import nn"]
+}
 
-'''
-model = AutoModelForCausalLM.from_pretrained(model_name)
-model.to(device)
-compile_times = []
-for i in range(N_ITERS):
-    with torch.no_grad():
-        _, compile_time = timed(lambda: model.generate(input_tokens, attention_mask=attention_mask, max_length=50, pad_token_id=pad_token_id))
-    compile_times.append(compile_time)
-    print(f"eager eval time {i}: {compile_time}")
-
-'''
-gpt_fast_model = gpt_fast(model_name, draft_model_name=draft_model_name, sample_function=argmax)
+gpt_fast_model = gpt_fast(model_name, sample_function=argmax, max_length=60, cache_config=cache_config, draft_model_name=draft_model_name)
 gpt_fast_model.to(device)
 
+gpt_fast_model.generate(cur_tokens=input_tokens, max_tokens=MAX_TOKENS, speculate_k=6)
+
+'''
 fast_compile_times = []
 for i in range(N_ITERS):
     with torch.no_grad():
@@ -67,3 +76,6 @@ for i in range(N_ITERS):
     fast_compile_times.append(compile_time)
     print(f"gpt fast eval time {i}: {compile_time}")
 print("~" * 10)
+
+print(tokenizer.decode(res[0]))
+'''
