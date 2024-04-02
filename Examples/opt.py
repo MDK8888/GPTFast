@@ -3,6 +3,7 @@ import torch
 from transformers import AutoTokenizer
 from GPTFast.Core import gpt_fast
 from GPTFast.Helpers import timed
+from transformers import GPTNeoForCausalLM
 
 torch._dynamo.reset()
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -31,7 +32,7 @@ def argmax_variation(self, probabilities:torch.Tensor, temperature:float = 1, k:
 def argmax(self, probabilities):
     # Use argmax to get the token with the maximum probability
     max_prob_index = torch.argmax(probabilities, dim=-1)
-    return max_prob_index.unsqueeze(0)
+    return max_prob_index.view(1, 1)
 
 model_name = "facebook/opt-1.3b"
 draft_model_name = "facebook/opt-125m"
@@ -43,7 +44,41 @@ input_tokens = tokenizer.encode(initial_string, return_tensors="pt").to(device)
 N_ITERS=10
 MAX_TOKENS=50
 
-gpt_fast_model = gpt_fast(model_name, draft_model_name=draft_model_name, sample_function=argmax)
+cache_config = {
+    "model_config": {
+        "path_to_blocks": ["model", "decoder", "layers"],
+        "child_ref_in_parent_forward": ["model.decoder", "decoder", "decoder_layer"],
+    },
+    "block_config": {
+        "path_to_attn": ["self_attn"],
+        "child_ref_in_parent_forward": ["self_attn"], 
+    },
+    "attn_config": {
+        "cache_update_config":{
+            "kv_cache_condition":"elif past_key_value is not None",
+            "key_name": "self._shape(self.k_proj(hidden_states), -1, bsz)",
+            "value_name": "self._shape(self.v_proj(hidden_states), -1, bsz)",
+            "new_key_name": "key_states",
+            "new_value_name": "value_states",
+        },
+        "causal_mask_config": {
+            "causal_mask_application": "conditional",
+            "causal_mask_method": "forward",
+            "causal_mask_condition": "if attention_mask is not None"
+        }
+    }, 
+    "imports":["import torch", 
+                "import transformers", 
+                "from transformers import *", 
+                "from torch import *", 
+                "from typing import *", 
+                "import types", 
+                "from transformers.modeling_outputs import *", 
+                "from torch import nn", 
+                "from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask"]
+}
+
+gpt_fast_model = gpt_fast(model_name, sample_function=argmax, max_length=60, cache_config=cache_config, draft_model_name=draft_model_name)
 gpt_fast_model.to(device)
 
 fast_compile_times = []

@@ -31,7 +31,7 @@ def argmax_variation(self, probabilities:torch.Tensor, temperature:float = 1, k:
 def argmax(self, probabilities):
     # Use argmax to get the token with the maximum probability
     max_prob_index = torch.argmax(probabilities, dim=-1)
-    return max_prob_index.unsqueeze(0)
+    return max_prob_index.view(1, 1)
 
 model_name = "EleutherAI/gpt-neo-1.3B"
 draft_model_name = "EleutherAI/gpt-neo-125m"
@@ -43,7 +43,41 @@ input_tokens = tokenizer.encode(initial_string, return_tensors="pt").to(device)
 N_ITERS=10
 MAX_TOKENS=50
 
-gpt_fast_model = gpt_fast(model_name, draft_model_name=draft_model_name, sample_function=argmax)
+cache_config = {
+    "model_config": {
+        "path_to_blocks": ["transformer", "h"],
+        "child_ref_in_parent_forward": ["transformer", "block"],
+    },
+    "block_config": {
+        "path_to_attn": ["attn", "attention"],
+        "child_ref_in_parent_forward": ["attn", "attention"], 
+    },
+    "attn_config": {
+        "cache_update_config":{
+            "kv_cache_condition":"if layer_past is not None",
+            "key_name": "key",
+            "value_name": "value",
+        },
+        "causal_mask_config": {
+            "causal_mask_application": "", #this can be anything as long as it is not "conditional"
+            "causal_mask_method": "_attn",
+            "causal_mask_line": "query_length, key_length = query.size(-2), key.size(-2)",
+            "num_lines": 11
+        }
+    },
+    "imports": ["import torch", 
+                "import transformers", 
+                "from transformers import *", 
+                "from torch import *", 
+                "from typing import *", 
+                "import types", 
+                "from transformers.modeling_outputs import *", 
+                "from torch import nn", 
+                "from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask"
+                ]
+}
+
+gpt_fast_model = gpt_fast(model_name, sample_function=argmax, max_length=60, cache_config=cache_config, draft_model_name=draft_model_name)
 gpt_fast_model.to(device)
 
 fast_compile_times = []
@@ -53,3 +87,5 @@ for i in range(N_ITERS):
     fast_compile_times.append(compile_time)
     print(f"gpt fast eval time {i}: {compile_time}")
 print("~" * 10)
+
+print(tokenizer.decode(res[0]))

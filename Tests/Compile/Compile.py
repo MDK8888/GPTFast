@@ -1,7 +1,7 @@
 import os
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from GPTFast.Core.Compile import torch_compile_model
+from GPTFast.Core.Compile.Compile import torch_compile_model
 from GPTFast.Helpers import timed
 
 torch._dynamo.reset()
