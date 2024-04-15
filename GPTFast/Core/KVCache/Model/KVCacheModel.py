@@ -6,7 +6,8 @@ from transformers.models.bloom.modeling_bloom import BloomForCausalLM
 from transformers import AutoModelForCausalLM
 from GPTFast.Helpers.Class import *
 from GPTFast.Helpers.String import *
-from .KVCache import KVCache
+from ..Cache.KVCache import KVCache
+from .NativeCacheWrapper import NativeCacheWrapper
 
 INFERENCE_BATCH_SIZE = 1
 
@@ -36,6 +37,10 @@ class KVCacheModel(nn.Module):
 
     @classmethod
     def add_static_cache_to_model(cls, model:AutoModelForCausalLM, cache_config:dict, max_generated_length:int, dtype:torch.dtype, device:torch.device):
+        if "Native" in cache_config and cache_config["Native"] == True:
+            new_model = NativeCacheWrapper(model, cache_config, max_generated_length, dtype, device)
+            return new_model
+
         assert "model_config" in cache_config, "you must specify how your model will be updated to accomadate a static kv cache."
         model_config = cache_config["model_config"]
         assert "path_to_blocks" in model_config, "you must specify how to reach the blocks from the model."

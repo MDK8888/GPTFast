@@ -2,7 +2,7 @@
 import types
 import torch
 import torch.nn as nn
-from ..KVCache.KVCacheModel import KVCacheModel
+from ..KVCache import KVCacheModel
 
 #ok, here's the key behind speculative decoding. We have two models, Mq the small model and Mp the large model. 
 #1. Run Mq on prefix and obtain the distribution for x1 q(x).
