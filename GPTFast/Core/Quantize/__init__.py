@@ -1,1 +1,3 @@
-from .quantize_int8 import *
+from .INT8 import *
+from .GPTQ import *
+from .Quantize import *
