@@ -11,16 +11,16 @@ from .KVCache import KVCache
 INFERENCE_BATCH_SIZE = 1
 
 class KVCacheModel(nn.Module):
-    def __init__(self, model:nn.Module, sample_fn:Callable[..., torch.Tensor], max_length:int, cache_config:dict, dtype:torch.dtype):
+    def __init__(self, model:nn.Module, sample_fn:Callable[..., torch.Tensor], cache_config:dict, dtype:torch.dtype, device:torch.device):
         super().__init__()
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = device
         self.sample = types.MethodType(sample_fn, self)
 
         assert not isinstance(model, BloomForCausalLM), "Bloom models currently have an unsupported kv cache shape."
 
-        self._model = self.add_static_cache_to_model(model, cache_config, max_length, dtype, self.device)
+        self._model = self.add_static_cache_to_model(model, cache_config, dtype, self.device)
         config = self._model.config
-        self._max_length = max_length
+        self._max_length = cache_config["max_length"]
         self._num_hidden_layers = config.num_hidden_layers
         self._num_attention_heads = config.num_key_value_heads if hasattr(config, "num_key_value_heads") else config.num_attention_heads
         self._head_dim = config.head_dim if hasattr(config, "head_dim") else config.hidden_size // config.num_attention_heads
@@ -35,7 +35,7 @@ class KVCacheModel(nn.Module):
         self._dummy_key_values = self._init_key_values
 
     @classmethod
-    def add_static_cache_to_model(cls, model:AutoModelForCausalLM, cache_config:dict, max_generated_length:int, dtype:torch.dtype, device:torch.device):
+    def add_static_cache_to_model(cls, model:AutoModelForCausalLM, cache_config:dict, dtype:torch.dtype, device:torch.device):
         assert "model_config" in cache_config, "you must specify how your model will be updated to accomadate a static kv cache."
         model_config = cache_config["model_config"]
         assert "path_to_blocks" in model_config, "you must specify how to reach the blocks from the model."
@@ -74,7 +74,9 @@ class KVCacheModel(nn.Module):
             cache_update_config = attn_config["cache_update_config"]
 
             attention_layer = sub_module_with_input_pos
-            cache = KVCache(model.config, 1, max_generated_length, device = device, dtype=dtype)  
+            assert "max_length" in cache_config, "You must specify how large your kv cache will be before it can be statically allocated."
+            max_length = cache_config["max_length"]
+            cache = KVCache(model.config, 1, max_length, device = device, dtype=dtype)  
             attention_layer.kv_cache = cache
 
             assert "kv_cache_condition" in cache_update_config, "you must specify the condition under which the key-value cache is updated in the attention layer."
@@ -204,6 +206,6 @@ class KVCacheModel(nn.Module):
         self._prob_history = self._init_prob_history
         self._cached_len = 0
 
-def add_kv_cache(transformer:nn.Module, sampling_fn:Callable, max_length:int, cache_config:dict, dtype) -> KVCacheModel:
-    model = KVCacheModel(transformer, sampling_fn, max_length, cache_config, dtype)
+def add_kv_cache(model:nn.Module, sample_fn:Callable, cache_config:dict, dtype:torch.dtype, device:torch.device) -> KVCacheModel:
+    model = KVCacheModel(model, sample_fn, cache_config, dtype, device)
     return model
