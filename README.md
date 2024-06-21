@@ -11,10 +11,10 @@ GPTFast Inference Time|Eager Inference Time
 
 # Roadmap 
 
-- ⟳ 0.7.x (TBD): Medusa Decoding, Speculative Sampling, Eagle Decoding
-- ⟳ 0.6.x (TBD): BitNet and 1-bit Quantization, AWQ, QoQ, GGUF, HQQ
-- ⟳ 0.5.x (TBD): PagedAttention (vLLM) + FlashAttention integration 
-- ⟳ 0.4.x (TBD): Tensor parallelism + GPU distributed inference 
+- ⟳ 0.7.x (xx/xx/xx): Medusa Decoding, Speculative Sampling, Eagle Decoding
+- ⟳ 0.6.x (xx/xx/xx): BitNet and 1-bit Quantization, AWQ, QoQ, GGUF, HQQ
+- ⟳ 0.5.x (xx/xx/xx): PagedAttention (vLLM) + FlashAttention integration 
+- ⟳ 0.4.x (xx/xx/xx): Tensor parallelism + GPU distributed inference 
 - ✅ 0.3.x (06/20/24): GPTQ int4 quantization and optimized int4 matmul kernels enabled for all HF models (**9x inference acceleration**) 
 - ✅ 0.2.x (04/02/24): static key-value cache enabled for all HF models (**8.5x inference acceleration**)
 - ✅ 0.1.x (02/22/24): torch.compile, int8 quantization, speculative decoding (**7x inference acceleration**)
