@@ -1,5 +1,5 @@
 # GPTFast
-Accelerate your Hugging Face Transformers 6-8.5x with GPTFast!
+Accelerate your Hugging Face Transformers 7.6-9x with GPTFast!
 
 # Background
 [GPTFast](https://github.com/pytorch-labs/gpt-fast) was originally a set of techniques developed by the PyTorch Team to accelerate the inference speed of Llama-2-7b. This pip package generalizes those techniques to all Hugging Face models. 
@@ -10,6 +10,10 @@ GPTFast Inference Time|Eager Inference Time
 ![](https://github.com/MDK8888/GPTFast/assets/79173446/4d7ed04e-ba3d-49c7-aeca-8f2b96ac45a8)|![](https://github.com/MDK8888/GPTFast/assets/79173446/1a4f2236-d2f4-42c7-a689-553482871905)
 
 # Getting Started
+
+## WARNING: The below documentation is now deprecated with version 0.3.0. New docs will be up soon! ##
+
+
 * Make sure that your python version >= 3.10, and you are on a cuda enabled device.
 * Make a virtual environment on your machine and activate it.
   ```bash
