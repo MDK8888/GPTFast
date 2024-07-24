@@ -12,6 +12,7 @@ from ..Functions import *
 from ..Modules import *
 from .GPTQLinearModuleQuantizer import *
 from ...Quantizer import Quantizer
+from GPTFast.Helpers.Time import *
 
 logger = getLogger(__name__)
 handler = logging.StreamHandler()
@@ -27,7 +28,12 @@ class GPTQModelQuantizer(Quantizer):
 
     def __init__(self, model_name:str, calibration_data_fn:Callable[..., Dict[str, Union[torch.LongTensor, list[int]]]], quantize_config:dict, device:torch.device = "cpu"):
         self.model_name = model_name
-        self.model = AutoModelForCausalLM.from_pretrained(model_name)
+        try:
+            self.model = AutoModelForCausalLM.from_pretrained(model_name, attn_implementation="eager")
+        except Exception as e:
+            logger.info("We do not need to specify the attention implementation for this model, using default...")
+            self.model = AutoModelForCausalLM.from_pretrained(model_name)
+
         self.config = self.model.config
         self.calibration_data_fn = types.MethodType(calibration_data_fn, self)
         self.quantized_state_dict = self.model.state_dict()
@@ -35,7 +41,7 @@ class GPTQModelQuantizer(Quantizer):
         model_suffix = self.model_name.split("/")[-1]
         self.quantized_state_dict_path = f"{model_suffix}-gptq.pth" if self.quantize_config["save_quantized_state_dict"] else None
         self.device = device
-        self.model.to(self.device)
+        self.model = self.model.to(self.device)
         self._quantized = False
     
     def skip_layer_func(self, name:str, linear_module:Union[nn.Linear, transformers.pytorch_utils.Conv1D]) -> bool:
@@ -184,7 +190,7 @@ class GPTQModelQuantizer(Quantizer):
         if not self.quantize_config["true_sequential"]:
             inside_layer_modules = [sum(inside_layer_modules, [])] #for GPT2 for example, this is c_attn, c_proj, mlp.c_fc, mlp.c_proj
         for i in range(len(layers)):
-            logger.info(f"Start quantizing layer {i + 1}/{len(layers)}")
+            logger.info(f"Start quantizing layer {i + 1}/{len(layers)} {get_current_time_string()}")
             layer = layers[i]
 
             full = find_layers_dict(layer)
@@ -221,7 +227,7 @@ class GPTQModelQuantizer(Quantizer):
 
                 #actually quantize each layer.
                 for name in subset:
-                    logger.info(f"Quantizing {name} in layer {i + 1}/{len(layers)}...")
+                    logger.info(f"Quantizing {name} in layer {i + 1}/{len(layers)} {get_current_time_string()}")
                     Q, DQ, QParams = gptq[name].quantize()
 
                     #modify state_dict here.

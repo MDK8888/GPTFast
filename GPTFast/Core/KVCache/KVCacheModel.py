@@ -11,10 +11,11 @@ from .KVCache import KVCache
 INFERENCE_BATCH_SIZE = 1
 
 class KVCacheModel(nn.Module):
-    def __init__(self, model:nn.Module, sample_fn:Callable[..., torch.Tensor], cache_config:dict, dtype:torch.dtype, device:torch.device):
+    def __init__(self, model:nn.Module, sample_fn:Callable[..., torch.Tensor], cache_config:dict, dtype:torch.dtype, device:torch.device, profile_enabled:bool = False):
         super().__init__()
         self.device = device
         self.sample = types.MethodType(sample_fn, self)
+        self.profile_enabled = profile_enabled
 
         assert not isinstance(model, BloomForCausalLM), "Bloom models currently have an unsupported kv cache shape."
 
@@ -178,8 +179,7 @@ class KVCacheModel(nn.Module):
         all_input_ids = torch.empty((INFERENCE_BATCH_SIZE, 0), dtype=torch.long).to(self.device)
 
         for _ in range(length):
-            with torch.no_grad():
-                last_logits = self.forward(uncached_input_ids)
+            last_logits = self.forward(uncached_input_ids)
 
             token_probabilities = torch.nn.functional.softmax(last_logits, dim=-1)
             next_token = self.sample(token_probabilities, **sampling_kwargs)
@@ -194,18 +194,16 @@ class KVCacheModel(nn.Module):
         else:
             return all_probabilities
         
-    @torch.no_grad()
     def rollback_cache(self, last_pos:int) -> None:
         self._cached_len = last_pos
         self._dummy_key_values = self._full_key_values[:, :, :, :, :self._cached_len]
         self._prob_history = self._prob_history[:, :self._cached_len, :]
     
-    @torch.no_grad()
     def clear(self):
         self._dummy_key_values = self._init_key_values
         self._prob_history = self._init_prob_history
         self._cached_len = 0
 
-def add_kv_cache(model:nn.Module, sample_fn:Callable, cache_config:dict, dtype:torch.dtype, device:torch.device) -> KVCacheModel:
-    model = KVCacheModel(model, sample_fn, cache_config, dtype, device)
+def add_kv_cache(model:nn.Module, sample_fn:Callable, cache_config:dict, dtype:torch.dtype, device:torch.device, profile_enabled:bool) -> KVCacheModel:
+    model = KVCacheModel(model, sample_fn, cache_config, dtype, device, profile_enabled)
     return model
