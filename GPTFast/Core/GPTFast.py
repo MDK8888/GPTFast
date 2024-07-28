@@ -1,13 +1,12 @@
 from typing import Callable, Union, Dict
 import torch
-from transformers import AutoModelForCausalLM
 from GPTFast.Core.KVCache import add_kv_cache
 from GPTFast.Core.Compile import torch_compile_model
 from GPTFast.Core.Decode import add_speculative_decoding
 from GPTFast.Core.Quantize import quantize
 
 def gpt_fast(model_name:str, calibration_data_function:Callable[..., Dict[str, Union[torch.LongTensor, list[int]]]], quantize_config:dict, \
-             sample_function:Callable[..., torch.LongTensor], cache_config:dict, device:torch.device, profile:bool, **spec_dec_kwargs):
+             sample_function:Callable[..., torch.LongTensor], cache_config:dict, device:torch.device, profile:bool = False, **spec_dec_kwargs):
     
     #quantize the model
     assert "quantization_mode" in quantize_config, "You must specify how your model will be quantized."

@@ -1,6 +1,6 @@
 import torch
 from transformers import AutoModelForCausalLM
-from typing import Union, Dict
+from typing import Union, Dict, Callable
 from .GPTQ import *
 from .INT8 import *
 

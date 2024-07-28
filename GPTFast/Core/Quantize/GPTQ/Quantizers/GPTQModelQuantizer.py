@@ -1,5 +1,6 @@
 import os
 import copy
+import json
 import types
 from typing import List, Dict, Union, Callable
 import logging
@@ -42,6 +43,8 @@ class GPTQModelQuantizer(Quantizer):
         self.quantized_state_dict_path = f"{model_suffix}-gptq.pth" if self.quantize_config["save_quantized_state_dict"] else None
         self.device = device
         self.model = self.model.to(self.device)
+        self.json_log_path = f"{model_suffix}-gptq-logs.json"
+        self.logs = {}
         self._quantized = False
     
     def skip_layer_func(self, name:str, linear_module:Union[nn.Linear, transformers.pytorch_utils.Conv1D]) -> bool:
@@ -190,8 +193,9 @@ class GPTQModelQuantizer(Quantizer):
         if not self.quantize_config["true_sequential"]:
             inside_layer_modules = [sum(inside_layer_modules, [])] #for GPT2 for example, this is c_attn, c_proj, mlp.c_fc, mlp.c_proj
         for i in range(len(layers)):
-            logger.info(f"Start quantizing layer {i + 1}/{len(layers)} {get_current_time_string()}")
+            logger.info(f"Start quantizing layer {i + 1}/{len(layers)}:{get_current_time_string()}")
             layer = layers[i]
+            layer_stats = {}
 
             full = find_layers_dict(layer)
             for names in inside_layer_modules:
@@ -220,20 +224,25 @@ class GPTQModelQuantizer(Quantizer):
                         layer_input.append(layer_inp.to(self.device))
 
                     layer_attention_mask = attention_masks[j].to(self.device)
-                    additional_layer_inputs = {"attention_mask": layer_attention_mask}
+                    additional_layer_inputs = {}
                     layer(*layer_input, **additional_layer_inputs)
                 for h in handles:
                     h.remove()
 
                 #actually quantize each layer.
                 for name in subset:
-                    logger.info(f"Quantizing {name} in layer {i + 1}/{len(layers)} {get_current_time_string()}")
+                    logger.info(f"Quantizing {name} in layer {i + 1}/{len(layers)}:{get_current_time_string()}")
                     Q, DQ, QParams = gptq[name].quantize()
+
+                    stats = gptq[name].get_statistics(DQ, QParams)
+                    layer_stats[name] = stats
 
                     #modify state_dict here.
                     names_and_values_dict = self.make_names_and_values_dict_func(Q, QParams)
                     self.update_quantized_state_dict(name, i, names_and_values_dict)
                     gptq[name].free()
+
+                self.logs[f"layer_{i}"] = layer_stats
 
             #finally, we get the layer_input for the next block by passing in the layer_output from the previous block.
             for j in range(num_batches):
@@ -259,8 +268,10 @@ class GPTQModelQuantizer(Quantizer):
 
         self._quantized = True
 
+        self.write_logs()
+
         torch.cuda.empty_cache()
-    
+
     def replace_linear_int4(self, module:nn.Module, groupsize:int = 128, inner_k_tiles:int = 8, padding_allowed:bool = True, skip_layer_func:Callable = None):
         #logger.info("Swapping nn.Linear layers out and replacing them with WeightOnlyInt4Linear")
         for name, child in module.named_children():
@@ -297,3 +308,8 @@ class GPTQModelQuantizer(Quantizer):
         self.model.load_state_dict(self.quantized_state_dict)
         self.model = self.model.to(self.device)
         return self.model
+    
+    def write_logs(self):
+        with open(self.json_log_path, 'w') as f:
+            json.dump(self.logs, f, indent=2)
+        print(f"Quantization logs written to {self.json_log_path}")

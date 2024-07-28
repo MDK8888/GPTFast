@@ -127,6 +127,9 @@ def generate(self, cur_tokens:torch.Tensor, max_tokens:int, speculate_k:int, **s
     return cur_tokens
 
 def generate_kv_cache(self, cur_tokens:torch.Tensor, max_tokens:int, speculate_k:int, **sampling_kwargs) -> torch.Tensor:
+
+    print("profile:", self.profile_enabled)
+
     assert isinstance(self, KVCacheModel), "Your model must be a KVCache model for this to work."
     assert hasattr(self, "draft_model") and isinstance(self.draft_model, KVCacheModel), "You must have a draft model and it must be a KVCacheModel for the generate() method."
     assert len(cur_tokens.shape) == 2 and cur_tokens.shape[0] == 1, "Your batch size must be 1"
@@ -134,23 +137,34 @@ def generate_kv_cache(self, cur_tokens:torch.Tensor, max_tokens:int, speculate_k
 
     device = cur_tokens.device
 
+    # Preallocate tensor
+    result = torch.full((1, max_tokens), fill_value=0, dtype=torch.long, device=device)
+    result[:, :cur_tokens.shape[1]] = cur_tokens
+    current_length = cur_tokens.shape[1]
+
     #prefill phase
     self.draft_model.prefill(cur_tokens)
     new_q = self.prefill(cur_tokens)
 
     new_token = self.sample(new_q, **sampling_kwargs).to(device)
 
-    cur_tokens = torch.cat((cur_tokens, new_token), dim=-1).to(torch.long)
+    # Use pad instead of cat
+    result[:, current_length] = new_token
+    current_length += 1
 
-    while len(cur_tokens[0]) < max_tokens:
-        uncached_tokens = cur_tokens[:, -1].view(1, 1)
+    while current_length < max_tokens:
+        uncached_tokens = result[:, current_length-1].view(1, 1)
         new_tokens = self.speculative_decode(uncached_tokens, speculate_k, **sampling_kwargs)
-        cur_tokens = torch.cat((cur_tokens, new_tokens), dim=-1).to(torch.long)
+        
+        # Copy new tokens to preallocated tensor
+        tokens_to_add = min(new_tokens.shape[1], max_tokens - current_length)
+        result[:, current_length:current_length+tokens_to_add] = new_tokens[:, :tokens_to_add]
+        current_length += tokens_to_add
 
     self.clear()
     self.draft_model.clear()
 
-    return cur_tokens    
+    return result[:, :current_length]  
 
 def add_speculative_decoding(model: nn.Module, draft_model: nn.Module) -> nn.Module:
     model.draft_model = draft_model
