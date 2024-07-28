@@ -12,8 +12,7 @@ class WeightOnlyInt4Linear(nn.Module):
 
     def __init__(
         self, in_features: int, out_features: int,
-        bias=False, device=None, dtype=None, groupsize: int = 128, inner_k_tiles: int = 8,
-    ) -> None:
+        bias=False, device=None, dtype=None, groupsize: int = 128, inner_k_tiles: int = 8) -> None:
         super().__init__()
         self.padding = not check_linear_int4_k(in_features, groupsize, inner_k_tiles)
         if self.padding:

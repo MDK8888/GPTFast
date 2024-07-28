@@ -16,7 +16,7 @@ class GPTQLinearModuleQuantizer(Quantizer):
         self.blocksize = blocksize
         self.percdamp = percdamp
         self.groupsize = groupsize
-        self.device = device
+        self.device = "cuda"
         self.nsamples = 0
         self.all_inputs = []
         self.all_outputs = []
@@ -245,61 +245,11 @@ class GPTQLinearModuleQuantizer(Quantizer):
         self.H = None
         self.Losses = None
         self.Trace = None
+        del self.all_inputs
+        del self.all_outputs
         self.all_inputs = []
         self.all_outputs = []
         torch.cuda.empty_cache()
-    
-    def get_statistics(self, DQ: torch.Tensor, qparams: tuple):
-        def to_cpu_copy(tensor):
-            return tensor.cpu().clone() if tensor.is_cuda else tensor
-
-        all_inputs = torch.cat([to_cpu_copy(tensor) for tensor in self.all_inputs], dim=0)
-        all_outputs = torch.cat([to_cpu_copy(tensor) for tensor in self.all_outputs], dim=0)
-        
-        original_weight = to_cpu_copy(self.layer.weight.data)
-        reconstructed_weight = to_cpu_copy(DQ)
-
-        if isinstance(self.layer, transformers.Conv1D):
-            reconstructed_weight = reconstructed_weight.t()
-        quantized_outputs = torch.matmul(all_inputs, reconstructed_weight)
-
-        mse_loss = nn.MSELoss()
-        reconstruction_error = mse_loss(original_weight, reconstructed_weight)
-        output_error = mse_loss(all_outputs, quantized_outputs)
-
-        error_distribution = (all_outputs - quantized_outputs).abs()
-
-        # Uniform quantization for comparison
-        uniform_quantized_weight = to_cpu_copy(uniform_quantize(original_weight))
-        if isinstance(self.layer, transformers.Conv1D):
-            uniform_output = torch.matmul(all_inputs, uniform_quantized_weight)
-        else:
-            uniform_output = torch.matmul(all_inputs, uniform_quantized_weight.t())
-        uniform_error = mse_loss(all_outputs, uniform_output)
-
-        stats = {
-            "reconstruction_error": reconstruction_error.item(),
-            "output_error": output_error.item(),
-            "original_output_sample": all_outputs[:5, :5].tolist(),
-            "quantized_output_sample": quantized_outputs[:5, :5].tolist(),
-            "original_weight_scale": original_weight.abs().mean().item(),
-            "reconstructed_weight_scale": reconstructed_weight.abs().mean().item(),
-            "error_distribution_mean": error_distribution.mean().item(),
-            "error_distribution_std": error_distribution.std().item(),
-            "uniform_quantization_error": uniform_error.item(),
-            "uniform_output_sample": uniform_output[:5, :5].tolist(),
-            "weight_sample_original": original_weight[:5, :5].tolist(),
-            "weight_sample_reconstructed": reconstructed_weight[:5, :5].tolist(),
-            "scales_sample": to_cpu_copy(qparams[0])[:5, :5].tolist(),
-            "zero_points_sample": to_cpu_copy(qparams[1])[:5, :5].tolist(),
-            "weight_distribution": {
-                "original_mean": original_weight.mean().item(),
-                "original_std": original_weight.std().item(),
-                "reconstructed_mean": reconstructed_weight.mean().item(),
-                "reconstructed_std": reconstructed_weight.std().item()
-            }
-        }
-        return stats
 
 def find_layers_dict(module, layers=None, name=""):
     if not layers:
