@@ -15,7 +15,7 @@ from ..Functions import *
 from ..Modules import *
 from .GPTQLinearModuleQuantizer import *
 from ...Quantizer import Quantizer
-from GPTFast.Helpers.Time import *
+from GPTFast.Helpers import *
 
 logger = getLogger(__name__)
 handler = logging.StreamHandler()
@@ -48,52 +48,12 @@ class GPTQModelQuantizer(Quantizer):
         self.model = self.model.to(self.device)
         self.json_log_path = f"{model_suffix}-gptq-logs.json"
         self.log_quant_stats = quantize_config.get("log_quant_stats", False)
+        self.quant_stats = defaultdict(lambda: defaultdict(list))
         self._quantized = False
     
     def skip_layer_func(self, name:str, linear_module:Union[nn.Linear, transformers.pytorch_utils.Conv1D]) -> bool:
         linear_weight = linear_module.weight
         return (name in self.quantize_config["skipped_layers"]) or (not check_linear_int4_k(linear_weight.shape[-1], self.quantize_config["groupsize"]))
-
-    def _prepare_examples_for_quantization(self, examples:List[Dict[str, Union[List[int], torch.LongTensor]]], batch_size:int):
-        def _convert_tensor_to_list(tensor):
-            if isinstance(tensor, torch.Tensor):
-                if len(tensor.shape) == 1:
-                    tensor = tensor.unsqueeze(0)
-                tensor = tensor.long()
-                return tensor.cpu().numpy().tolist()
-            return [tensor]
-
-        new_examples = []
-        for example in examples:
-            input_ids = _convert_tensor_to_list(example["input_ids"])
-            attention_mask = _convert_tensor_to_list(example["attention_mask"])
-            if "labels" in example:
-                labels = _convert_tensor_to_list(example["labels"])
-            elif "label" in example:
-                labels = _convert_tensor_to_list(example["label"])
-            elif "label_ids" in example:
-                labels = _convert_tensor_to_list(example["label_ids"])
-            else:
-                labels = copy.deepcopy(input_ids)
-            new_examples.append(
-                {
-                    "input_ids": input_ids,
-                    "attention_mask": attention_mask,
-                    "labels": labels,
-                }
-            )
-        pad_token_id = self.config.pad_token_id
-        if not pad_token_id:
-            pad_token_id = self.config.eos_token_id
-
-        new_examples = [
-            collate_data(new_examples[start : start + batch_size], pad_token_id)
-            for start in range(0, len(new_examples), batch_size)
-        ]
-        for new_example in new_examples:
-            del new_example["labels"]
-
-        return new_examples
     
     def make_names_and_values_dict_func(self, q, qparams):
         groupsize = self.quantize_config["groupsize"]
@@ -133,138 +93,144 @@ class GPTQModelQuantizer(Quantizer):
 
         return module
 
-    @torch.inference_mode()
-    def create_quantized_state_dict(
-        self,
-        examples: List[Dict[str, Union[List[int], torch.LongTensor]]],
-        batch_size: int = 1,
-    ):
+    @torch.inference_mode
+    def create_quantized_state_dict(self, examples: list[torch.Tensor], batch_size: int = 1):
+        self.model.eval()
+        layers = self.find_block_module_list()
+        
+        layer_input = []
+        layer_output = []
 
-        layer_inputs = []
-        attention_masks = []
-        position_ids = []
-        layer_input_kwargs = []
-        layer_outputs = []
+        # Hook for the first layer to collect inputs
+        def first_layer_hook(module, input, output):
+            layer_input.append(input[0].detach())
 
-        examples = self._prepare_examples_for_quantization(examples, batch_size)
+        first_layer = layers[0]
+        first_layer_hook_handle = first_layer.register_forward_hook(first_layer_hook)
 
-        forward_pass_use_cache = self.model.config.use_cache
-        self.model.config.use_cache = False
+        # Pass examples through the first layer to populate layer_input
+        with torch.no_grad():
+            for example in examples:
+                self.model(example)
 
-        num_batches = len(examples)
-        layers = self.find_block_module_list() 
+        first_layer_hook_handle.remove()
 
-        def store_input_hook(_, args, kwargs):
-            # Positional arguments.
-            layer_input = []
-            for inp in args:
-                layer_input.append(inp.to(self.device))
-            layer_inputs.append(layer_input)
+        for i, layer in enumerate(layers):
+            logger.info(f"Quantizing layer {i + 1}/{len(layers)} : {get_current_time_string()}")
+            
+            # Find the modules to quantize within this layer
+            modules_to_quantize = {}
+            for module_paths in self.quantize_config["inside_layer_modules"]:
+                for module_path in module_paths:
+                    module = get_nested_attr(layer, module_path)
+                    if module is not None:
+                        modules_to_quantize[module_path] = module
+            
+            # Create GPTQLinearModuleQuantizers for each module
+            quantizers = {}
+            original_outputs = {}
+            for name, module in modules_to_quantize.items():
+                quantizers[name] = GPTQLinearModuleQuantizer(
+                    module, 
+                    blocksize=self.quantize_config.get("blocksize", 128),
+                    percdamp=self.quantize_config.get("percdamp", 0.01),
+                    groupsize=self.quantize_config["groupsize"],
+                    device=self.device
+                )
+                original_outputs[name] = []
+            
+            # Attach hooks to all modules for quantization and collecting original outputs
+            quant_hooks = []
+            for name, module in modules_to_quantize.items():
+                def quant_hook_fn(module, input, output, name=name):
+                    quantizers[name].add_batch(input[0], output)
+                    original_outputs[name].append(output.detach())
+                
+                quant_hooks.append(module.register_forward_hook(quant_hook_fn))
+            
+            # Hook for the current layer to collect outputs
+            def layer_output_hook(module, input, output):
+                layer_output.append(output[0].detach())
 
-            # Keyword arguments.
-            if kwargs["attention_mask"] is not None:
-                attention_masks.append(kwargs["attention_mask"].to(self.device))
-            else:
-                attention_masks.append(None)
+            layer_output_hook_handle = layer.register_forward_hook(layer_output_hook)
+            
+            # Pass layer_input through the current layer
+            with torch.no_grad():
+                for inp in layer_input:
+                    layer(inp)
+            
+            # Remove hooks
+            for hook in quant_hooks:
+                hook.remove()
+            layer_output_hook_handle.remove()
+            
+            # Quantize and update state dict
+            for name, quantizer in quantizers.items():
+                logger.info(f"Quantizing {name} in layer {i + 1}/{len(layers)} : {get_current_time_string()}")
+                Q, DQ, QParams = quantizer.quantize()
+                
+                names_and_values_dict = self.make_names_and_values_dict_func(Q, QParams)
+                self.update_quantized_state_dict(name, i, names_and_values_dict)
+                
+                # Calculate activation error
+                quantized_module = WeightOnlyInt4Linear(
+                    quantizer.layer.weight.shape[0], 
+                    quantizer.layer.weight.shape[1], 
+                    bias=False,
+                    groupsize=self.quantize_config["groupsize"],
+                    inner_k_tiles=self.quantize_config["groupsize"] // 16
+                ).to(self.device)
+                quantized_module.load_state_dict(names_and_values_dict)
+                
+                total_mse = 0
+                total_relative_error = 0
+                num_samples = len(quantizer.all_inputs)
 
-            pos_ids = kwargs.get("position_ids", None)
-            if pos_ids is not None:
-                position_ids.append(pos_ids.to(self.device))
-            one_kwargs = {}
-            layer_input_kwargs.append(one_kwargs)
-            raise ValueError
+                for original_input, original_output in zip(quantizer.all_inputs, original_outputs[name]):
+                    # Ensure inputs have the same shape
+                    if original_input.dim() == 2:
+                        original_input = original_input.unsqueeze(0)  # Add batch dimension if needed
+                    
+                    quantized_output = quantized_module(original_input)
+                    
+                    # Ensure outputs have the same shape for comparison
+                    if original_output.dim() == 3 and quantized_output.dim() == 2:
+                        quantized_output = quantized_output.unsqueeze(0)
+                    elif original_output.dim() == 2 and quantized_output.dim() == 3:
+                        original_output = original_output.unsqueeze(0)
+                    
+                    # Calculate MSE
+                    mse = F.mse_loss(original_output, quantized_output).item()
+                    
+                    # Calculate relative error
+                    relative_error = torch.norm(original_output - quantized_output) / torch.norm(original_output)
+                    
+                    total_mse += mse
+                    total_relative_error += relative_error.item()
 
-        # TODO: make this optional, backporting https://github.com/huggingface/optimum/blob/main/optimum/gptq/quantizer.py
-        handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
-        for example in examples:
-            try:
-                for k, v in example.items():
-                    if len(v.shape) == 1:
-                        v = v.unsqueeze(0)
-                    example[k] = v.to(self.device)
-                #the forward hook runs before each forward pass. Basically, after this loop runs, we obtain args, kwargs, attention_masks, and position_ids.
-                #we also move everything to the cur_layer_device. 
-                self.model(**example)
-            except ValueError:
-                pass
-        handle.remove()
+                avg_mse = total_mse / num_samples
+                avg_relative_error = total_relative_error / num_samples
 
-        torch.cuda.empty_cache()
-
-        #inside_layer_modules is just the modules inside of each block.
-        inside_layer_modules = self.quantize_config["inside_layer_modules"]
-        if not self.quantize_config["true_sequential"]:
-            inside_layer_modules = [sum(inside_layer_modules, [])] #for GPT2 for example, this is c_attn, c_proj, mlp.c_fc, mlp.c_proj
-        for i in range(len(layers)):
-            logger.info(f"Start quantizing layer {i + 1}/{len(layers)} : {get_current_time_string()}")
-            layer = layers[i]
-            layer_stats = {}
-
-            full = find_layers_dict(layer)
-            for names in inside_layer_modules:
-                subset = {n: full[n] for n in names if n in full}
-                #so, subset is just the modules we want to quantize in a dict, where the names are strings and the values are the layer itself.
-                #n is the name of the string.
-                gptq = {}
-                for name in subset:
-                    gptq[name] = GPTQLinearModuleQuantizer(subset[name], groupsize=self.quantize_config["groupsize"], device=self.device)
-
-                #this is a little sus-we return a function after the forward method? 
-                #Got you - basically, when add_batch returns a function, the function returned is the actual hook that will run. 
-                def add_batch(name):
-                    def tmp(_, inp, out):
-                        gptq[name].add_batch(inp[0].data, out.data)  # noqa: F821
-
-                    return tmp
-
-                handles = []
-                #the whole point of these next 3 for-loops is to add_batches to all of our GPTQ quantizers so that we can quantize later. 
-                for name in subset:
-                    handles.append(subset[name].register_forward_hook(add_batch(name)))
-                for j in range(num_batches):
-                    layer_input = []
-                    for k, layer_inp in enumerate(layer_inputs[j]):
-                        layer_input.append(layer_inp.to(self.device))
-                    layer_attention_mask = attention_masks[j].to(self.device)
-                    additional_layer_inputs = {"attention_mask": layer_attention_mask}
-                    layer(*layer_input, **additional_layer_inputs)
-                for h in handles:
-                    h.remove()
-
-                #actually quantize each layer.
-                for name in subset:
-                    logger.info(f"Quantizing {name} in layer {i + 1}/{len(layers)} : {get_current_time_string()}")
-                    Q, DQ, QParams = gptq[name].quantize()
-
-                    #modify state_dict here.
-                    names_and_values_dict = self.make_names_and_values_dict_func(Q, QParams)
-                    self.update_quantized_state_dict(name, i, names_and_values_dict)
-                    gptq[name].free()
-
-            #finally, we get the layer_input for the next block by passing in the layer_output from the previous block.
-            for j in range(num_batches):
-                layer_input = []
-                for k, layer_inp in enumerate(layer_inputs[j]):
-                    layer_input.append(layer_inp.to(self.device))
-
-                layer_attention_mask = attention_masks[j].to(self.device)
-                additional_layer_inputs = {"attention_mask": layer_attention_mask}
-                layer_output = layer(*layer_input, **additional_layer_inputs)[0].to(self.device)
-                layer_outputs.append([layer_output])
-
-            layers[i] = layer.to(self.device)
-            del layer
-            del gptq
-            del layer_inputs
-            layer_inputs, layer_outputs = layer_outputs, []  # TODO: is it really OK to cache only the first positional argument?
+                logger.info(f"  Activation error for {name}:")
+                logger.info(f"    Average MSE: {avg_mse:.6f}")
+                logger.info(f"    Average Relative Error: {avg_relative_error:.6f}")
+                
+                # Free memory
+                quantizer.free()
+                del quantizer
+            
+            # Clear unnecessary memory
+            del quantizers
+            del layer_input
+            layer_input = layer_output
+            layer_output = []
             torch.cuda.empty_cache()
-
-        self.model.config.use_cache = forward_pass_use_cache
-        if self.quantized_state_dict_path != None:
-            torch.save(self.quantized_state_dict, self.quantized_state_dict_path)
-
+        
         self._quantized = True
-
+        
+        if self.quantized_state_dict_path:
+            torch.save(self.quantized_state_dict, self.quantized_state_dict_path)
+        
         torch.cuda.empty_cache()
 
     def replace_linear_int4(self, module:nn.Module, groupsize:int = 128, inner_k_tiles:int = 8, padding_allowed:bool = True, skip_layer_func:Callable = None):
@@ -303,112 +269,5 @@ class GPTQModelQuantizer(Quantizer):
         logger.info("Loading quantized_state_dict into the model...")
         self.model.load_state_dict(self.quantized_state_dict)
         self.model = self.model.to(self.device)
+
         return self.model
-
-    def log_quantization_statistics(self, num_samples=1000, batch_size=1):
-        if not self._quantized:
-            logger.warning("Model is not quantized yet. Please quantize the model before logging statistics.")
-            return
-
-        logger.info("Collecting quantization statistics...")
-
-        # Load the original model
-        logger.info("Loading original model for comparison...")
-        original_model = AutoModelForCausalLM.from_pretrained(self.model_name, attn_implementation="eager")
-        original_model = original_model.to(torch.bfloat16).to(self.device)
-        original_model.eval()
-
-        # Prepare calibration data
-        calibration_data = self.calibration_data_fn()
-        prepared_examples = self._prepare_examples_for_quantization(calibration_data, batch_size)
-        prepared_examples = prepared_examples[:num_samples]  # Limit to num_samples
-
-        stats = defaultdict(lambda: defaultdict(list))
-
-        def hook_fn(module, input, output, name, is_quantized):
-            if isinstance(output, tuple):
-                output = output[0]  # Some modules might return tuples, we're interested in the first element
-            if isinstance(module, transformers.pytorch_utils.Conv1D) and not is_quantized:
-                # For original Conv1D, we need to transpose the output
-                output = output.transpose(1, 2)
-            elif isinstance(module, WeightOnlyInt4Linear):
-                # For WeightOnlyInt4Linear, we might need to reshape the output
-                output = output.view(output.size(0), -1, output.size(-1))
-            stats[name][f'{"quantized" if is_quantized else "original"}_output'] = output
-
-        quantized_hooks = []
-        original_hooks = []
-
-        # Attach hooks to both models
-        for (name, module), (orig_name, orig_module) in zip(self.model.named_modules(), original_model.named_modules()):
-            if isinstance(module, (nn.Linear, WeightOnlyInt4Linear, transformers.pytorch_utils.Conv1D)):
-                quantized_hooks.append(module.register_forward_hook(
-                    lambda m, i, o, n=name: hook_fn(m, i, o, n, True)
-                ))
-                original_hooks.append(orig_module.register_forward_hook(
-                    lambda m, i, o, n=name: hook_fn(m, i, o, n, False)
-                ))
-
-        # Run inference
-        self.model.eval()
-        with torch.no_grad():
-            for example in tqdm(prepared_examples, desc="Processing batches"):
-                input_ids = example["input_ids"].to(self.device)
-                attention_mask = example["attention_mask"].to(self.device)
-
-                _ = self.model(input_ids=input_ids, attention_mask=attention_mask)
-                _ = original_model(input_ids=input_ids, attention_mask=attention_mask)
-
-                # Compute statistics
-                for name in stats:
-                    if 'quantized_output' in stats[name] and 'original_output' in stats[name]:
-                        quantized_output = stats[name]['quantized_output']
-                        original_output = stats[name]['original_output']
-
-                        # Ensure shapes match
-                        if quantized_output.shape != original_output.shape:
-                            logger.warning(f"Shape mismatch in layer {name}: quantized {quantized_output.shape}, original {original_output.shape}")
-                            # Reshape to match
-                            if quantized_output.numel() == original_output.numel():
-                                quantized_output = quantized_output.view(original_output.shape)
-
-                        mse_loss = nn.MSELoss()
-                        error = mse_loss(quantized_output, original_output)
-                        relative_error = torch.norm(quantized_output - original_output) / torch.norm(original_output)
-
-                        stats[name]['mse'].append(error.item())
-                        stats[name]['relative_error'].append(relative_error.item())
-
-                    # Clear outputs to free memory
-                    stats[name].pop('quantized_output', None)
-                    stats[name].pop('original_output', None)
-
-        # Remove hooks
-        for hook in quantized_hooks + original_hooks:
-            hook.remove()
-
-        # Compute average statistics
-        for name in stats:
-            if 'mse' in stats[name]:
-                stats[name]['avg_mse'] = sum(stats[name]['mse']) / len(stats[name]['mse'])
-                stats[name]['avg_relative_error'] = sum(stats[name]['relative_error']) / len(stats[name]['relative_error'])
-                del stats[name]['mse']
-                del stats[name]['relative_error']
-
-        # Log statistics
-        logger.info("Quantization Statistics:")
-        for name, layer_stats in stats.items():
-            if 'avg_mse' in layer_stats:
-                logger.info(f"  Layer: {name}")
-                logger.info(f"    Average MSE: {layer_stats['avg_mse']:.6f}")
-                logger.info(f"    Average Relative Error: {layer_stats['avg_relative_error']:.6f}")
-
-        # Save to JSON file
-        json_log_path = f"{self.model_name.split('/')[-1]}-quantization-stats.json"
-        with open(json_log_path, 'w') as f:
-            json.dump(stats, f, indent=2)
-        logger.info(f"Detailed quantization statistics written to {json_log_path}")
-
-        # Clean up
-        del original_model
-        torch.cuda.empty_cache()
