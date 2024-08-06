@@ -128,7 +128,8 @@ class GPTQModelQuantizer(Quantizer):
             
             # Create GPTQLinearModuleQuantizers for each module
             quantizers = {}
-            original_outputs = {}
+            if self.log_quant_stats:
+                original_outputs = {}
             for name, module in modules_to_quantize.items():
                 quantizers[name] = GPTQLinearModuleQuantizer(
                     module, 
@@ -137,14 +138,16 @@ class GPTQModelQuantizer(Quantizer):
                     groupsize=self.quantize_config["groupsize"],
                     device=self.device
                 )
-                original_outputs[name] = []
+                if self.log_quant_stats:
+                    original_outputs[name] = []
             
             # Attach hooks to all modules for quantization and collecting original outputs
             quant_hooks = []
             for name, module in modules_to_quantize.items():
                 def quant_hook_fn(module, input, output, name=name):
                     quantizers[name].add_batch(input[0], output)
-                    original_outputs[name].append(output.detach())
+                    if self.log_quant_stats:
+                        original_outputs[name].append(output.detach())
                 
                 quant_hooks.append(module.register_forward_hook(quant_hook_fn))
             
@@ -172,48 +175,49 @@ class GPTQModelQuantizer(Quantizer):
                 names_and_values_dict = self.make_names_and_values_dict_func(Q, QParams)
                 self.update_quantized_state_dict(name, i, names_and_values_dict)
                 
-                # Calculate activation error
-                quantized_module = WeightOnlyInt4Linear(
-                    quantizer.layer.weight.shape[0], 
-                    quantizer.layer.weight.shape[1], 
-                    bias=False,
-                    groupsize=self.quantize_config["groupsize"],
-                    inner_k_tiles=self.quantize_config["groupsize"] // 16
-                ).to(self.device)
-                quantized_module.load_state_dict(names_and_values_dict)
-                
-                total_mse = 0
-                total_relative_error = 0
-                num_samples = len(quantizer.all_inputs)
+                if self.log_quant_stats:
+                    # Calculate activation error
+                    quantized_module = WeightOnlyInt4Linear(
+                        quantizer.layer.weight.shape[0], 
+                        quantizer.layer.weight.shape[1], 
+                        bias=False,
+                        groupsize=self.quantize_config["groupsize"],
+                        inner_k_tiles=self.quantize_config["groupsize"] // 16
+                    ).to(self.device)
+                    quantized_module.load_state_dict(names_and_values_dict)
+                    
+                    total_mse = 0
+                    total_relative_error = 0
+                    num_samples = len(quantizer.all_inputs)
 
-                for original_input, original_output in zip(quantizer.all_inputs, original_outputs[name]):
-                    # Ensure inputs have the same shape
-                    if original_input.dim() == 2:
-                        original_input = original_input.unsqueeze(0)  # Add batch dimension if needed
-                    
-                    quantized_output = quantized_module(original_input)
-                    
-                    # Ensure outputs have the same shape for comparison
-                    if original_output.dim() == 3 and quantized_output.dim() == 2:
-                        quantized_output = quantized_output.unsqueeze(0)
-                    elif original_output.dim() == 2 and quantized_output.dim() == 3:
-                        original_output = original_output.unsqueeze(0)
-                    
-                    # Calculate MSE
-                    mse = F.mse_loss(original_output, quantized_output).item()
-                    
-                    # Calculate relative error
-                    relative_error = torch.norm(original_output - quantized_output) / torch.norm(original_output)
-                    
-                    total_mse += mse
-                    total_relative_error += relative_error.item()
+                    for original_input, original_output in zip(quantizer.all_inputs, original_outputs[name]):
+                        # Ensure inputs have the same shape
+                        if original_input.dim() == 2:
+                            original_input = original_input.unsqueeze(0)  # Add batch dimension if needed
+                        
+                        quantized_output = quantized_module(original_input)
+                        
+                        # Ensure outputs have the same shape for comparison
+                        if original_output.dim() == 3 and quantized_output.dim() == 2:
+                            quantized_output = quantized_output.unsqueeze(0)
+                        elif original_output.dim() == 2 and quantized_output.dim() == 3:
+                            original_output = original_output.unsqueeze(0)
+                        
+                        # Calculate MSE
+                        mse = F.mse_loss(original_output, quantized_output).item()
+                        
+                        # Calculate relative error
+                        relative_error = torch.norm(original_output - quantized_output) / torch.norm(original_output)
+                        
+                        total_mse += mse
+                        total_relative_error += relative_error.item()
 
-                avg_mse = total_mse / num_samples
-                avg_relative_error = total_relative_error / num_samples
+                    avg_mse = total_mse / num_samples
+                    avg_relative_error = total_relative_error / num_samples
 
-                logger.info(f"  Activation error for {name}:")
-                logger.info(f"    Average MSE: {avg_mse:.6f}")
-                logger.info(f"    Average Relative Error: {avg_relative_error:.6f}")
+                    logger.info(f"  Activation error for {name}:")
+                    logger.info(f"    Average MSE: {avg_mse:.6f}")
+                    logger.info(f"    Average Relative Error: {avg_relative_error:.6f}")
                 
                 # Free memory
                 quantizer.free()
@@ -268,6 +272,5 @@ class GPTQModelQuantizer(Quantizer):
         self.replace_linear_int4(self.model, groupsize=groupsize, inner_k_tiles=groupsize // 16, skip_layer_func=self.skip_layer_func)
         logger.info("Loading quantized_state_dict into the model...")
         self.model.load_state_dict(self.quantized_state_dict)
-        self.model = self.model.to(self.device)
 
-        return self.model
+        return self.model.to(self.device)

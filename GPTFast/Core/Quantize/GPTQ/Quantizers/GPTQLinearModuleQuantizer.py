@@ -122,12 +122,10 @@ class GPTQLinearModuleQuantizer(Quantizer):
             self.inp1 = inp
             self.out1 = out
         if len(inp.shape) == 2:
+            inp = inp.unsqueeze(0)
             self.all_inputs.append(inp)
             self.all_outputs.append(out)
-        elif len(inp.shape) == 3:
-            # If input is 3D (batch, sequence, hidden), we need to reshape it
-            self.all_inputs.append(inp.view(-1, inp.shape[-1]))
-            self.all_outputs.append(out.view(-1, out.shape[-1]))
+
         tmp = inp.shape[0]
         if isinstance(self.layer, nn.Linear) or isinstance(self.layer, transformers.Conv1D):
             if len(inp.shape) == 3:
@@ -164,7 +162,7 @@ class GPTQLinearModuleQuantizer(Quantizer):
         device = W.device
 
         if groupsize == -1:
-            cur_qparams = self.get_qparams_func(W)
+            cur_qparams = self.get_qparams_func(W, groupsize=groupsize)
 
         dead = torch.diag(H) == 0
         H[dead, dead] = 1
@@ -172,6 +170,7 @@ class GPTQLinearModuleQuantizer(Quantizer):
 
         Losses = torch.zeros_like(W)
         DQ = torch.zeros_like(W)
+        Q = torch.zeros_like(W)
 
         damp = percdamp * torch.mean(torch.diag(H))
         diag = torch.arange(columns, device=device)
@@ -187,6 +186,7 @@ class GPTQLinearModuleQuantizer(Quantizer):
             count = i2 - i1
             W1 = W[:, i1:i2].clone()
             DQ1 = torch.zeros_like(W1)
+            Q1 = torch.zeros_like(W1)
             Err1 = torch.zeros_like(W1)
             Losses1 = torch.zeros_like(W1)
             Hinv1 = Hinv[i1:i2, i1:i2]
@@ -201,11 +201,12 @@ class GPTQLinearModuleQuantizer(Quantizer):
                     all_qparams.append(cur_qparams)
 
                 scales, zeros = cur_qparams
+                print("scales.shape:", scales.shape)
+                print("zeros.shape:", zeros.shape)
 
                 q = self.quantize_func(w.unsqueeze(1), scales=scales, zeros=zeros, groupsize=groupsize).flatten()
-
+                Q1[:, i] = q
                 #  `dequantize_func`.
-
                 dq = self.dequantize_func(q.unsqueeze(1), scales=scales, zeros=zeros, groupsize=groupsize).flatten()
 
                 DQ1[:, i] = dq
@@ -217,6 +218,7 @@ class GPTQLinearModuleQuantizer(Quantizer):
                 )
                 Err1[:, i] = err1
 
+            Q[:, i1:i2] = Q1
             DQ[:, i1:i2] = DQ1
             Losses[:, i1:i2] = Losses1 / 2
 
@@ -234,7 +236,6 @@ class GPTQLinearModuleQuantizer(Quantizer):
         #  `combine_qparams_list_func`.
         all_qparams = self.combine_qparams_list_func(all_qparams)
         scales, zeros = all_qparams
-        Q = self.quantize_func(DQ, scales=scales, zeros=zeros, groupsize=groupsize)
 
         return Q, DQ.to(orig_dtype), all_qparams
 
