@@ -116,7 +116,7 @@ __global__ void int4_matmul_unpack32_kernel(
                 
                 // Dequantize here, accounting for the quantization scheme
                 float dequantized = (frag_acc.x[i] - MID) * scale + zero;
-                out[out_idx] = dequantized;
+                out[out_idx] += dequantized; //add here, don't just set. In tiling, we need to add because each 16 x 8 product is only a piece of the total.
             }
         }
     }
