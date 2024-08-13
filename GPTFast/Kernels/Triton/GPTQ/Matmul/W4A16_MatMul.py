@@ -2,6 +2,10 @@ import triton
 from triton import language as tl
 # from actual_base_gptq_4 import triton_matmul4
 
+Q_MIN = 0
+Q_MAX = 15
+MID = (Q_MIN + Q_MAX + 1) // 2 
+
 @triton.jit()
 def swizzle_tile(pid,
                 m, n,
@@ -45,24 +49,29 @@ def matmul_split_k_kernel(a_ptr, b_ptr, c_ptr, scales_ptr, zeros_ptr,
                                 m, n,
                                 block_m, block_n, group_m)
     
-    offs_m = pid_m*block_m + tl.arange(0, block_m)
-    offs_n = pid_n*block_n + tl.arange(0, block_n)
-    offs_k = pid_k*block_k + tl.arange(0, block_k)
+    offs_m = pid_m * block_m + tl.arange(0, block_m)
+    offs_n = pid_n * block_n + tl.arange(0, block_n)
+    offs_k = pid_k * block_k + tl.arange(0, block_k)
 
     offs_am = tl.max_contiguous(tl.multiple_of(offs_m, block_m), block_m)
     offs_bn = tl.max_contiguous(tl.multiple_of(offs_n, block_n), block_n)
 
     a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
     b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + (offs_bn[None, :] // 8) * stride_bn) #b_ptr is now packed horizontally, not vertically.
+    #you sneaky bitch. basically, because of offs_bn[None, :] // 8, we have a lot of repeat columns, which is why the bit shift is ok.
 
     #in our scenario, in the original matrix, scales and zeros both had dimensions (In, Out // groupsize).
-    #how does our two lines below need to change to reflect this? Here, scales_ptr, zeros_ptr have sizes (Out // groupsize, In).
+    #how does our two lines below need to change to reflect this? Here, scales_ptr, zeros_ptr have sizes (Out // groupsize, In), so they are transposed.
 
     scales_ptrs = scales_ptr + (offs_bn // groupsize) * stride_scales_n
     zeros_ptrs = zeros_ptr + (offs_bn // groupsize) * stride_zeros_n
 
-    shifter = (offs_k % 8) * 4
-    zeros_shifter = (offs_bn % 8) * 4
+    #at this point, scales_ptrs, zeros_ptrs are arrays of pointers to the first elements of the conceptual columns for the scales and 
+    #zeros needed for quantization in the first iteration of the loop.
+
+    shifter = (offs_bn % 8) * 4
+    #we remove zeros_shifter, not necessary
+    #zeros_shifter = (offs_bn % 8) * 4
     
     acc = tl.zeros((block_m, block_n), dtype=tl.float32)
     for k in range(0, total_blocks_k):
@@ -70,25 +79,26 @@ def matmul_split_k_kernel(a_ptr, b_ptr, c_ptr, scales_ptr, zeros_ptr,
         a = tl.load(a_ptrs)
         b = tl.load(b_ptrs)
         
-        g_id = (k * split_k + pid_k) // (groupsize // block_k)
+        #ok, we now need to fix this line. Because we are quantizing horizontally now, get rid of denominator.
+        start_id = k * split_k + pid_k
+        g_id = start_id * block_k + tl.arange(0, block_k)
 
-        ptr = scales_ptrs + g_id * stride_scales_g
+        #ok, let's think about ptr right now. ptr is still an array, and it is an array of pointers to the first scales that we need.
+        #from this point, we need to load block_k elements vertically - how can we do this?
+        ptr = scales_ptrs + g_id[None, :] * stride_scales_g
         scales = tl.load(ptr)
         
-        ptr = zeros_ptrs + g_id * stride_zeros_g
+        ptr = zeros_ptrs + g_id[None, :] * stride_zeros_g
         zeros = tl.load(ptr) 
 
-        zeros = (zeros >> zeros_shifter) & 0xF
-        zeros = (zeros + 1) * scales
-
-        b = (b >> shifter[:, None]) & 0xF
-        b = b * scales[None, :] - zeros[None, :]
+        b = (b >> shifter[None, :]) & 0xF
+        b = (b - MID) * scales[None, :] + zeros[None, :]
 
         acc += tl.dot(a, b)
         a_ptrs += block_k * split_k * stride_ak
         b_ptrs += (block_k // 8) * split_k * stride_bk
 
-    acc.to(tl.float16)
+    acc.to(tl.bfloat16)
 
     offs_m = pid_m*block_m + tl.arange(0, block_m)
     offs_n = pid_n*block_n + tl.arange(0, block_n)
