@@ -92,7 +92,7 @@ def matmul_split_k_kernel(a_ptr, b_ptr, c_ptr, scales_ptr, zeros_ptr,
 
         b = (b >> shifter[None, :]) & 0xF
         b = (b - MID) * scales + zeros
-        
+
         acc += tl.dot(a, b)
         a_ptrs += block_k * split_k * stride_ak
         b_ptrs += (block_k // 8) * split_k * stride_bk
@@ -105,12 +105,13 @@ def matmul_split_k_kernel(a_ptr, b_ptr, c_ptr, scales_ptr, zeros_ptr,
     c_ptrs = c_ptr + (offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn)
     tl.atomic_add(c_ptrs, acc, sem='release')
 
-def int4_matmul(a:torch.Tensor, b:torch.Tensor, scales:torch.Tensor, zeros:torch.Tensor, groupsize:int = 128):
+def int4_matmul(a: torch.Tensor, b: torch.Tensor, scales: torch.Tensor, zeros: torch.Tensor, groupsize: int = 128):
     num_warps = 4
     num_stages = 3
 
     m, k = a.shape
-    _, n = b.shape
+    _, n = b.shape  # b is packed, so its shape is (k//8, n)
+    n = n * 8  # Adjust n to account for packed format
 
     block_m = 16
     block_n = 32
@@ -126,15 +127,19 @@ def int4_matmul(a:torch.Tensor, b:torch.Tensor, scales:torch.Tensor, zeros:torch
     grid = (total_programs_mn, total_programs_k)
 
     c = torch.zeros((m, n), device=a.device, dtype=torch.float16)
-    k = matmul_split_k_kernel[grid](a, b, c, scales, zeros,
-                              a.stride(0), a.stride(1),
-                              b.stride(0), b.stride(1),
-                              c.stride(0), c.stride(1),
-                              scales.stride(0), scales.stride(1),
-                              zeros.stride(0), zeros.stride(1),
-                              groupsize,
-                              m, n, k,
-                              block_m, block_n, block_k,
-                              group_m, split_k, num_stages=num_stages, num_warps=num_warps)
+    k = matmul_split_k_kernel[grid](
+        a, b, c, scales, zeros,
+        a.stride(0), a.stride(1),
+        b.stride(0), b.stride(1),
+        c.stride(0), c.stride(1),
+        scales.stride(0), scales.stride(1),
+        zeros.stride(0), zeros.stride(1),
+        groupsize,
+        m, n, k,
+        block_m, block_n, block_k,
+        group_m, split_k,
+        num_stages=num_stages,
+        num_warps=num_warps
+    )
     
     return c
