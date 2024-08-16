@@ -49,6 +49,7 @@ def int4_matmul_kernel_3d(
     c_ptrs = c_ptr + (offs_am[:, None] * stride_cm + offs_bn[None, :] * stride_cn)
     tl.atomic_add(c_ptrs, acc.to(tl.float16))
 
+@torch.compile(fullgraph=True)
 def int4_matmul(a, b, scales, zeros, groupsize: int = 128):
     assert a.is_cuda and b.is_cuda and scales.is_cuda and zeros.is_cuda
     assert b.shape[0] == a.shape[1] // 8, "Packed weight shape mismatch"
