@@ -201,8 +201,6 @@ class GPTQLinearModuleQuantizer(Quantizer):
                     all_qparams.append(cur_qparams)
 
                 scales, zeros = cur_qparams
-                print("scales.shape:", scales.shape)
-                print("zeros.shape:", zeros.shape)
 
                 q = self.quantize_func(w.unsqueeze(1), scales=scales, zeros=zeros, groupsize=groupsize).flatten()
                 Q1[:, i] = q
