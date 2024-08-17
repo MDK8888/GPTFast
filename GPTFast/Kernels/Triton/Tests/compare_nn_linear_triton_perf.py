@@ -9,7 +9,7 @@ def profile_and_compare():
     torch.cuda.manual_seed(0)
 
     # Set up dimensions
-    batch_size = 32
+    batch_size = 1
     in_features = 768
     out_features = 3072
 
