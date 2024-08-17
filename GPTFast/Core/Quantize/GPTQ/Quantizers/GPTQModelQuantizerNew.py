@@ -221,8 +221,8 @@ class GPTQModelQuantizerNew(Quantizer):
                 
                 if check_linear_int4_k(in_features, groupsize, inner_k_tiles) or self.quantize_config.get("padding_allowed", True):
                     new_module = WeightOnlyInt4Linear(
-                        in_features, out_features, bias=False,
-                        groupsize=groupsize, inner_k_tiles=inner_k_tiles
+                        in_features, out_features, 
+                        groupsize=groupsize
                     )
                     new_module.load_state_dict(layer_state_dict[name])
                     
