@@ -14,6 +14,7 @@ from ..Modules import *
 from .GPTQLinearModuleQuantizer import *
 from ...Quantizer import Quantizer
 from GPTFast.Helpers import *
+from GPTFast.Kernels import pack_int4_weights
 
 logger = getLogger(__name__)
 handler = logging.StreamHandler()
@@ -87,24 +88,10 @@ class GPTQModelQuantizerNew(Quantizer):
             raise
 
     def make_names_and_values_dict_func(self, q, qparams):
-        groupsize = self.quantize_config["groupsize"]
-        k = q.shape[1]
-        if not check_linear_int4_k(k, groupsize):
-            new_k = find_multiple(k, 1024)
-        else:
-            new_k = k
-        # how much we need to pad the weight
-        delta_k = new_k - q.shape[1]
-        q = q.to(torch.int32).to(self.device)
-        final_q = torch.ops.aten._convert_weight_to_int4pack(F.pad(q, pad=(0, delta_k)).contiguous(), innerKTiles = groupsize // 16)
-        scales = qparams[0].to(torch.bfloat16).to(self.device)
-        zeros = qparams[1].to(torch.bfloat16).to(self.device)
-        scales_and_zeros = pack_tinygemm_scales_and_zeros(scales, zeros)
-
-        # how many new groups we need for padded weight
-        delta_groups = new_k // self.quantize_config["groupsize"] - scales_and_zeros.shape[0]
-        final_s_and_z = F.pad(scales_and_zeros, pad=(0,0,0,0,0, delta_groups), value=1)
-        return {"weight": final_q, "scales_and_zeros": final_s_and_z}
+        packed_weights = pack_int4_weights(q).t()
+        scales, zeros = qparams
+        #make sure that scales and zeros are a good shape, but it looks good otherwise for the weights.
+        return {"weight": packed_weights, "scales": scales, "zeros": zeros}
 
     def quantize(self, batch_size: int = 1):
         if self.quantized_state_dict_path and os.path.exists(self.quantized_state_dict_path):
