@@ -14,7 +14,7 @@ def profile_and_compare():
     out_features = 3072
 
     # Create input tensor
-    input_tensor = torch.randn(batch_size, in_features, device='cuda', dtype=torch.float32)
+    input_tensor = torch.randn(batch_size, in_features, device='cuda', dtype=torch.float16)
 
     # Create quantized weight tensor (simulating the output of quantization)
     weight = torch.randint(0, 16, (out_features, in_features), device='cuda', dtype=torch.float32)
@@ -27,7 +27,7 @@ def profile_and_compare():
     zeros = torch.randn(out_features, num_groups, device='cuda', dtype=torch.float32)
 
     # Create nn.Linear layer
-    linear_layer = nn.Linear(in_features, out_features, bias=False).to('cuda')
+    linear_layer = nn.Linear(in_features, out_features, bias=False).to(torch.float16).to('cuda')
     linear_layer_compiled = torch.compile(linear_layer)
     int4_matmul_compiled = torch.compile(int4_matmul)
 

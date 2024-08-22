@@ -74,7 +74,8 @@ cache_config = {
                 "from torch import nn"]
 }
 
-gpt_fast_model = gpt_fast(model_name, sample_function=argmax, max_length=60, cache_config=cache_config, draft_model_name=draft_model_name)
+gpt_fast_model = gpt_fast(model_name, calibration_data_function=None, quantize_config={"quantization_mode": "INT8"}, sample_function=argmax, cache_config=cache_config, \
+                          device=device, draft_model_name=draft_model_name)
 gpt_fast_model.to(device)
 
 fast_compile_times = []

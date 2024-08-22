@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
-from GPTFast.Core.Quantize import GPTQLinearModuleQuantizer
+from GPTFast.Core.Quantize import GPTQLinearModuleQuantizer, WeightOnlyInt4Linear
 from GPTFast.Kernels import int4_matmul, pack_int4_weights
+from transformers.pytorch_utils import Conv1D
 
 def test_int4_matmul_kernel_correctness():
     # Set random seed for reproducibility
@@ -9,14 +10,15 @@ def test_int4_matmul_kernel_correctness():
 
     # Create a random linear layer with adjusted dimensions
     in_features, out_features = 128, 256  # Adjusted dimensions
-    linear_layer = nn.Linear(in_features, out_features, bias=False).to("cuda")
+    linear_layer = Conv1D(out_features, in_features) #nn.Linear(in_features, out_features, bias=False, dtype=torch.float16, device="cuda")
+    linear_layer = linear_layer.to(torch.float16).to("cuda")
 
     # Create random input data
     batch_size = 1  # Adjusted batch size
-    input_data = torch.randn(batch_size, in_features).to("cuda")
+    input_data = torch.randn(batch_size, in_features, dtype=torch.float16, device="cuda")
 
     # Initialize the GPTQLinearModuleQuantizer
-    quantizer = GPTQLinearModuleQuantizer(linear_layer, blocksize=128, percdamp=0.01, groupsize=32)
+    quantizer = GPTQLinearModuleQuantizer(linear_layer, "deez_nuts", blocksize=128, percdamp=0.01, groupsize=32, dtype=torch.float16, device="cuda")
 
     # Add batches of data
     num_batches = 10
@@ -40,19 +42,23 @@ def test_int4_matmul_kernel_correctness():
     print("Scales shape:", scales.shape)
     print("Zeros shape:", zeros.shape)
 
+    weight_only_int4_linear = WeightOnlyInt4Linear(in_features, out_features, groupsize=32)
+    weight_only_int4_linear.weight = packed_weights.to("cuda")
+    weight_only_int4_linear.scales = scales.to("cuda")
+    weight_only_int4_linear.zeros = zeros.to("cuda")
     # Create nn.Linear with DQ (without bias)
-    linear_dq = nn.Linear(in_features, out_features, bias=False).to("cuda")
+    linear_dq = nn.Linear(in_features, out_features, bias=False, dtype=torch.float16).to("cuda")
     linear_dq.weight.data = DQ
 
     # Test with input data
-    test_input = torch.randn(batch_size, in_features).to("cuda")
+    test_input = torch.randn(batch_size, in_features, dtype=torch.float16).to("cuda")
 
     # Forward pass through nn.Linear with DQ
     with torch.no_grad():
         dq_output = linear_dq(test_input)
 
     # Run our int4_matmul kernel
-    int4_matmul_kernel_output = int4_matmul(test_input, packed_weights, scales, zeros, groupsize=32)
+    int4_matmul_kernel_output = weight_only_int4_linear(test_input)
 
     dq_output = dq_output.to(torch.float16)
 

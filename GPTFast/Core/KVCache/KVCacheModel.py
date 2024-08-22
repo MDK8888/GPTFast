@@ -11,12 +11,10 @@ from .KVCache import KVCache
 INFERENCE_BATCH_SIZE = 1
 
 class KVCacheModel(nn.Module):
-    def __init__(self, model:nn.Module, sample_fn:Callable[..., torch.Tensor], cache_config:dict, dtype:torch.dtype, device:torch.device, profile_enabled:bool = False):
+    def __init__(self, model:nn.Module, sample_fn:Callable[..., torch.Tensor], cache_config:dict, dtype:torch.dtype, device:torch.device):
         super().__init__()
         self.device = device
         self.sample = types.MethodType(sample_fn, self)
-        self.profile_enabled = profile_enabled
-
         assert not isinstance(model, BloomForCausalLM), "Bloom models currently have an unsupported kv cache shape."
 
         self._model = self.add_static_cache_to_model(model, cache_config, dtype, self.device)
@@ -145,7 +143,7 @@ class KVCacheModel(nn.Module):
         return last_q
 
     @torch.no_grad()
-    def generate(self, prefix:torch.Tensor, gamma:int, **sampling_kwargs) -> torch.Tensor:
+    def generate(self, cur_tokens:torch.Tensor, max_tokens:int, **sampling_kwargs) -> torch.Tensor:
         """ forward the model gamma times
 
         Args:
@@ -155,15 +153,16 @@ class KVCacheModel(nn.Module):
         Returns:
             Torch.Tensor: prefix+generated tokens
         """
-        x = prefix
+        x = cur_tokens
 
         #prefill stage
         last_logits = self.prefill(x)
         last_prob = torch.nn.functional.softmax(last_logits, dim=-1)
         next_tok = self.sample(last_prob, **sampling_kwargs)
         x = torch.cat((x, next_tok), dim=1)
+        length = max_tokens - len(x[0])
 
-        for _ in range(gamma):
+        for _ in range(length):
             last_logits = self.forward(next_tok)
             last_prob = torch.nn.functional.softmax(last_logits, dim=-1)
             next_tok = self.sample(last_prob, **sampling_kwargs)
@@ -204,6 +203,6 @@ class KVCacheModel(nn.Module):
         self._prob_history = self._init_prob_history
         self._cached_len = 0
 
-def add_kv_cache(model:nn.Module, sample_fn:Callable, cache_config:dict, dtype:torch.dtype, device:torch.device, profile_enabled:bool) -> KVCacheModel:
-    model = KVCacheModel(model, sample_fn, cache_config, dtype, device, profile_enabled)
+def add_kv_cache(model:nn.Module, sample_fn:Callable, cache_config:dict, dtype:torch.dtype, device:torch.device) -> KVCacheModel:
+    model = KVCacheModel(model, sample_fn, cache_config, dtype, device)
     return model

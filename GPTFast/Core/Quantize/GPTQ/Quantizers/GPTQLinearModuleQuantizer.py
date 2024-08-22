@@ -3,6 +3,7 @@ import math
 from typing import Union
 import torch
 from torch import nn
+import torch.cuda.amp as amp
 import transformers
 from ..Constants import *
 from ..Functions import *
@@ -11,23 +12,27 @@ from GPTFast.Helpers.GPTQ import *
 
 class GPTQLinearModuleQuantizer(Quantizer):
 
-    def __init__(self, layer:Union[nn.Linear, transformers.Conv1D], blocksize:int = 128, percdamp:float = 0.01, groupsize:int = 128, device:torch.device = "cpu"):
+    def __init__(self, layer:Union[nn.Linear, transformers.Conv1D], name:str, blocksize:int = 128, percdamp:float = 0.01, groupsize:int = 128, device:torch.device = "cpu", dtype:torch.dtype = torch.float32):
         self.layer = layer
+        self.name = name
         self.blocksize = blocksize
         self.percdamp = percdamp
         self.groupsize = groupsize
-        self.device = "cuda"
+        self.device = device
+        self.dtype = dtype
         self.nsamples = 0
         self.all_inputs = []
         self.all_outputs = []
 
         W = layer.weight.data.clone()
+        assert W.dtype == self.dtype, f"Your weight does not have the dtype {self.dtype}."
         if isinstance(layer, transformers.pytorch_utils.Conv1D):
             W = W.t()
         self.columns = W.shape[1]
-        self.H = torch.zeros((self.columns, self.columns)).to(self.device)
+        self.H = torch.zeros((self.columns, self.columns), dtype=torch.float64, device=self.device)
+        self.counter = 0
 
-    def get_qparams_func(self, w, n_bit=4, groupsize=128, dtype=torch.bfloat16):
+    def get_qparams_func(self, w, n_bit=4, groupsize=128):
         if groupsize > w.shape[-1]:
             groupsize = w.shape[-1]
         assert groupsize > 1
@@ -41,8 +46,8 @@ class GPTQLinearModuleQuantizer(Quantizer):
         quant_min = 0
         quant_max = 2**n_bit - 1
         eps = 1e-6
-        scale_dtype = dtype
-        zero_point_dtype = dtype
+        scale_dtype = self.dtype
+        zero_point_dtype = self.dtype
 
         scale, zero_point = choose_qparams_affine(
             w,
@@ -58,14 +63,8 @@ class GPTQLinearModuleQuantizer(Quantizer):
             zero_point_domain=ZeroPointDomain.FLOAT
         )
 
-        return scale.to(dtype=dtype).reshape(w.shape[0], -1), zero_point.to(
-            dtype=dtype
-        ).reshape(w.shape[0], -1)
+        return scale.reshape(w.shape[0], -1), zero_point.reshape(w.shape[0], -1)
 
-    #ok, so basically this function returns to us the scales and zeros. What does this mean?
-    #Essentially, in quantization, what's going on is we have a weight W. In order to quantize it 
-    #to n bits, we need to send it to a range representable by n bits with (W - min_val)/scales.
-    #This function gets us our zeros and scales which are needed for the above.
     def quantize_func(
         self,
         w,
@@ -75,7 +74,6 @@ class GPTQLinearModuleQuantizer(Quantizer):
         groupsize=128,
     ):
         assert groupsize > 1
-        # needed for GPTQ single column quantize
         if groupsize > w.shape[-1] and scales.shape[-1] == 1:
             groupsize = w.shape[-1]
 
@@ -98,7 +96,6 @@ class GPTQLinearModuleQuantizer(Quantizer):
         groupsize=128,
     ):
         assert groupsize > 1
-        # needed for GPTQ single column dequantize
         if groupsize > w_int4x8.shape[-1] and scales.shape[-1] == 1:
             groupsize = w_int4x8.shape[-1]
         assert w_int4x8.shape[-1] % groupsize == 0
@@ -108,7 +105,7 @@ class GPTQLinearModuleQuantizer(Quantizer):
         input_dtype = torch.int32
         quant_min = 0
         quant_max = 2**n_bit - 1
-        return dequantize_affine(w_int4x8, block_size, scales, zeros, input_dtype, quant_min, quant_max, zero_point_domain=ZeroPointDomain.FLOAT, output_dtype=scales.dtype)
+        return dequantize_affine(w_int4x8, block_size, scales, zeros, input_dtype, quant_min, quant_max, zero_point_domain=ZeroPointDomain.FLOAT, output_dtype=self.dtype)
     
     def combine_qparams_list_func(self, qparams_list):
         result = []
@@ -117,7 +114,9 @@ class GPTQLinearModuleQuantizer(Quantizer):
             result.append(concatenated)
         return result
 
-    def add_batch(self, inp:torch.Tensor, out):
+    def add_batch(self, inp:torch.Tensor, out, log_hessian=False):
+        assert inp.dtype == self.dtype, f"You attempted to add an input of type {inp.dtype} but this GPTQLinearModuleQuantizer has dtype {self.dtype}."
+        assert out.dtype == self.dtype, f"You attempted to add an output of type {out.dtype} but this GPTQLinearModuleQuantizer has dtype {out.dtype}." 
         if os.environ.get("DEBUG"):
             self.inp1 = inp
             self.out1 = out
@@ -143,22 +142,22 @@ class GPTQLinearModuleQuantizer(Quantizer):
             inp = inp.flatten(1)
         self.H *= self.nsamples / (self.nsamples + tmp)
         self.nsamples += tmp
-        # inp = inp.float()
-        inp = math.sqrt(2 / self.nsamples) * inp.float()
-        # self.H += 2 / self.nsamples * inp.matmul(inp.t())
+        inp = math.sqrt(2 / self.nsamples) * inp.to(self.dtype)
         self.H += inp.matmul(inp.t())
+        if log_hessian:
+            print("inp:", inp)
+            print("Hessian after adding inp.matmul(inp.t()):", self.H)
+        self.counter+=1
 
     def quantize(self) -> tuple[torch.Tensor]:
         H = self.H
         W = self.layer.weight.data.clone()
+        assert W.dtype == self.dtype, f"The dtype of your weight {W.dtype} does not match the dtype of this quantizer {self.dtype}"
         if isinstance(self.layer, transformers.pytorch_utils.Conv1D):
             W = W.t()
         percdamp = self.percdamp
         blocksize = self.blocksize
         groupsize = self.groupsize
-        orig_dtype = W.dtype
-        W = W.detach().float()
-        _, columns = W.shape[0], W.shape[1]
         device = W.device
 
         if groupsize == -1:
@@ -170,23 +169,24 @@ class GPTQLinearModuleQuantizer(Quantizer):
 
         Losses = torch.zeros_like(W)
         DQ = torch.zeros_like(W)
-        Q = torch.zeros_like(W)
+        Q = torch.zeros_like(W, dtype=torch.int32)
 
         damp = percdamp * torch.mean(torch.diag(H))
-        diag = torch.arange(columns, device=device)
+        diag = torch.arange(self.columns, device=device)
         H[diag, diag] += damp
+
         H = torch.linalg.cholesky(H)
         H = torch.cholesky_inverse(H)
         H = torch.linalg.cholesky(H, upper=True)
-        Hinv = H
+        Hinv = H.to(self.dtype)
 
         all_qparams = []
-        for i1 in range(0, columns, blocksize):
-            i2 = min(i1 + blocksize, columns)
+        for i1 in range(0, self.columns, blocksize):
+            i2 = min(i1 + blocksize, self.columns)
             count = i2 - i1
             W1 = W[:, i1:i2].clone()
             DQ1 = torch.zeros_like(W1)
-            Q1 = torch.zeros_like(W1)
+            Q1 = torch.zeros_like(W1, dtype=torch.int32)
             Err1 = torch.zeros_like(W1)
             Losses1 = torch.zeros_like(W1)
             Hinv1 = Hinv[i1:i2, i1:i2]
@@ -194,7 +194,7 @@ class GPTQLinearModuleQuantizer(Quantizer):
                 w = W1[:, i]
                 d = Hinv1[i, i]
 
-                if groupsize != -1 and (i1 + i) % groupsize == 0:  # start of new group
+                if groupsize != -1 and (i1 + i) % groupsize == 0:
                     cur_qparams = self.get_qparams_func(
                         W[:, (i1 + i) : (i1 + i + groupsize)], groupsize=groupsize
                     )
@@ -204,7 +204,6 @@ class GPTQLinearModuleQuantizer(Quantizer):
 
                 q = self.quantize_func(w.unsqueeze(1), scales=scales, zeros=zeros, groupsize=groupsize).flatten()
                 Q1[:, i] = q
-                #  `dequantize_func`.
                 dq = self.dequantize_func(q.unsqueeze(1), scales=scales, zeros=zeros, groupsize=groupsize).flatten()
 
                 DQ1[:, i] = dq
@@ -212,7 +211,7 @@ class GPTQLinearModuleQuantizer(Quantizer):
 
                 err1 = (w - dq) / d
                 W1[:, i:] -= (
-                    err1.to(Hinv1.dtype).unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
+                    err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
                 )
                 Err1[:, i] = err1
 
@@ -220,22 +219,16 @@ class GPTQLinearModuleQuantizer(Quantizer):
             DQ[:, i1:i2] = DQ1
             Losses[:, i1:i2] = Losses1 / 2
 
-            W[:, i2:] -= Err1.to(Hinv.dtype).matmul(Hinv[i1:i2, i2:])
+            W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
 
         torch.cuda.synchronize()
 
         if all_qparams == []:
-
             all_qparams.append(cur_qparams)
 
-        # convert a list of qparams objects into a single one. enerally by
-        # concatenating a bunch of n,1 scale/zeros tensors into a n,num_groups tensor
-
-        #  `combine_qparams_list_func`.
         all_qparams = self.combine_qparams_list_func(all_qparams)
         scales, zeros = all_qparams
-
-        return Q, DQ.to(orig_dtype), all_qparams
+        return Q, DQ, all_qparams
 
     def free(self):
         if os.environ.get("DEBUG"):

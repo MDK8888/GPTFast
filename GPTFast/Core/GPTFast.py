@@ -6,7 +6,7 @@ from GPTFast.Core.Decode import add_speculative_decoding
 from GPTFast.Core.Quantize import quantize
 
 def gpt_fast(model_name:str, calibration_data_function:Callable[..., Dict[str, Union[torch.LongTensor, list[int]]]], quantize_config:dict, \
-             sample_function:Callable[..., torch.LongTensor], cache_config:dict, device:torch.device, profile:bool = False, **spec_dec_kwargs):
+             sample_function:Callable[..., torch.LongTensor], cache_config:dict, device:torch.device, **spec_dec_kwargs):
     
     #quantize the model
     assert "quantization_mode" in quantize_config, "You must specify how your model will be quantized."
@@ -16,7 +16,7 @@ def gpt_fast(model_name:str, calibration_data_function:Callable[..., Dict[str, U
     cache_dtype = torch.float32 if quantization_mode == "GPTQ" else torch.float16
 
     #Integrate static key-value cache
-    model = add_kv_cache(model=model, sample_fn=sample_function, cache_config=cache_config, dtype=cache_dtype, device=device, profile_enabled=profile)
+    model = add_kv_cache(model=model, sample_fn=sample_function, cache_config=cache_config, dtype=cache_dtype, device=device)
     spec_decode = False
 
     #If we have speculative decoding, apply previous techniques to the draft model as well
@@ -26,8 +26,7 @@ def gpt_fast(model_name:str, calibration_data_function:Callable[..., Dict[str, U
         draft_cache_dtype = torch.float32
         draft_model = quantize(quantization_mode=draft_quantization_mode, model_name=draft_model_name, calibration_data_fn=calibration_data_function, \
                                    quantize_config=quantize_config, device=device)
-        draft_model = add_kv_cache(model=draft_model, sample_fn=sample_function, cache_config=cache_config, dtype=draft_cache_dtype, device=device, \
-                                   profile_enabled=profile)
+        draft_model = add_kv_cache(model=draft_model, sample_fn=sample_function, cache_config=cache_config, dtype=draft_cache_dtype, device=device)
 
         #add speculative decoding
         model = add_speculative_decoding(model, draft_model, **spec_dec_kwargs)

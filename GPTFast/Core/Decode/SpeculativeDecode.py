@@ -1,9 +1,7 @@
-#In order for speculative decoding to work, the vocabulary for two models must be the same, i.e. the dictionary with id keys and string tokens must be the same.
 import types
 import torch
 import torch.nn as nn
 from ..KVCache.KVCacheModel import KVCacheModel
-from GPTFast.Helpers.Eval import profile_function
 
 #ok, here's the key behind speculative decoding. We have two models, Mq the small model and Mp the large model. 
 #1. Run Mq on prefix and obtain the distribution for x1 q(x).
@@ -127,9 +125,6 @@ def generate(self, cur_tokens:torch.Tensor, max_tokens:int, speculate_k:int, **s
     return cur_tokens
 
 def generate_kv_cache(self, cur_tokens:torch.Tensor, max_tokens:int, speculate_k:int, **sampling_kwargs) -> torch.Tensor:
-
-    print("profile:", self.profile_enabled)
-
     assert isinstance(self, KVCacheModel), "Your model must be a KVCache model for this to work."
     assert hasattr(self, "draft_model") and isinstance(self.draft_model, KVCacheModel), "You must have a draft model and it must be a KVCacheModel for the generate() method."
     assert len(cur_tokens.shape) == 2 and cur_tokens.shape[0] == 1, "Your batch size must be 1"
@@ -137,50 +132,27 @@ def generate_kv_cache(self, cur_tokens:torch.Tensor, max_tokens:int, speculate_k
 
     device = cur_tokens.device
 
-    # Preallocate tensor
-    result = torch.full((1, max_tokens), fill_value=0, dtype=torch.long, device=device)
-    result[:, :cur_tokens.shape[1]] = cur_tokens
-    current_length = cur_tokens.shape[1]
-
     #prefill phase
     self.draft_model.prefill(cur_tokens)
     new_q = self.prefill(cur_tokens)
 
     new_token = self.sample(new_q, **sampling_kwargs).to(device)
 
-    # Use pad instead of cat
-    result[:, current_length] = new_token
-    current_length += 1
+    cur_tokens = torch.cat((cur_tokens, new_token), dim=-1).to(torch.long)
 
-    while current_length < max_tokens:
-        uncached_tokens = result[:, current_length-1].view(1, 1)
+    while len(cur_tokens[0]) < max_tokens:
+        uncached_tokens = cur_tokens[:, -1].view(1, 1)
         new_tokens = self.speculative_decode(uncached_tokens, speculate_k, **sampling_kwargs)
-        
-        # Copy new tokens to preallocated tensor
-        tokens_to_add = min(new_tokens.shape[1], max_tokens - current_length)
-        result[:, current_length:current_length+tokens_to_add] = new_tokens[:, :tokens_to_add]
-        current_length += tokens_to_add
+        cur_tokens = torch.cat((cur_tokens, new_tokens), dim=-1).to(torch.long)
 
     self.clear()
     self.draft_model.clear()
 
-    return result[:, :current_length]  
+    return cur_tokens    
 
-def add_speculative_decoding(model: nn.Module, draft_model: nn.Module) -> nn.Module:
+def add_speculative_decoding(model:nn.Module, draft_model:nn.Module) -> nn.Module:
     model.draft_model = draft_model
 
-    model.speculative_decode = types.MethodType(profile_function(speculative_decode_kv_cache), model)
-    model.generate = types.MethodType(profile_function(generate_kv_cache), model)
+    model.speculative_decode = types.MethodType(speculative_decode_kv_cache, model)
+    model.generate = types.MethodType(generate_kv_cache, model)
     return model
-
-
-
-    
-    
-    
-
-    
-
-
-
-
