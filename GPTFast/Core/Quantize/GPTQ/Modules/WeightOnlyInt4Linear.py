@@ -1,47 +1,44 @@
 import torch
-from torch import nn
-from GPTFast.Helpers import *
-from ..Functions import *
-import torch.nn.functional as F
+import torch.nn as nn
+from typing import Union
+from GPTFast.Kernels import int4_matmul
 
 class WeightOnlyInt4Linear(nn.Module):
-    __constants__ = ['in_features', 'out_features']
-    in_features: int
-    out_features: int
-    weight: torch.Tensor
-
-    def __init__(
-        self, in_features: int, out_features: int,
-        bias=False, device=None, dtype=None, groupsize: int = 128, inner_k_tiles: int = 8,
-    ) -> None:
+    def __init__(self, in_features: int, 
+                       out_features: int, 
+                       name: str, 
+                       weight: torch.IntTensor,
+                       scales: torch.Tensor,
+                       zeros: torch.Tensor,
+                       bias: Union[torch.Tensor, None] = None,
+                       groupsize: int = 128):
         super().__init__()
-        self.padding = not check_linear_int4_k(in_features, groupsize, inner_k_tiles)
-        if self.padding:
-            self.origin_in_features = in_features
-            in_features = find_multiple(in_features, 1024)
-
         self.in_features = in_features
         self.out_features = out_features
-        assert not bias, "require bias=False"
         self.groupsize = groupsize
-        self.inner_k_tiles = inner_k_tiles
+        self.name = name
 
-        assert out_features % 8 == 0, "require out_features % 8 == 0"
-        assert in_features % (inner_k_tiles * 16) == 0, "require in_features % (innerKTiles * 16) == 0"
-        #for Conv1D, we need to transpose everything.
-        self.register_buffer(
-            "weight",
-            torch.empty((out_features // 8, in_features // (inner_k_tiles * 16), 32, inner_k_tiles // 2), dtype=torch.int32)
-        )
-        self.register_buffer(
-            "scales_and_zeros",
-            torch.empty((in_features // groupsize, out_features, 2), dtype=torch.bfloat16)
-        )
+        self.weight = weight
+        assert self.weight.shape == (in_features // 8, out_features), f"Your weight needs to be of shape ({in_features // 8}, {out_features}), but it currently has shape {self.weight.shape}"
+        assert torch.isnan(self.weight).any().item() == False, "Your self.weight contains NaN."
+
+        self.scales = scales
+        assert self.scales.shape == (out_features, in_features // groupsize), f"Your scales needs to be of shape ({out_features}, {in_features // 8}), but it currently has shape {self.scales.shape}"
+        assert torch.isnan(self.scales).any().item() == False, "Your self.scales contains NaN."
+
+        self.zeros = zeros
+        assert self.zeros.shape == (out_features, in_features // groupsize), f"Your zeros needs to be of shape ({out_features}, {in_features // 8}), but it currently has shape {self.scales.shape}"
+        assert torch.isnan(self.zeros).any().item() == False, "Your self.zeros contains NaN."
+
+        if bias is not None:
+            self.bias = bias
+        else:
+            self.bias = torch.zeros(out_features, device=weight.device, dtype=torch.float16)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        if self.padding:
-            input = F.pad(input, pad=(0, self.in_features - self.origin_in_features))
-        return linear_forward_int4(
-            input,
-            self.weight, self.scales_and_zeros, self.out_features, self.groupsize
-        )
+        orig_dtype = input.dtype
+        reshaped_input = input.to(torch.float16).view(-1, self.in_features)
+        output = int4_matmul(reshaped_input, self.weight, self.scales, self.zeros, self.groupsize)
+        new_output_shape = input.shape[:-1] + (output.shape[-1],)
+        output = output.view(new_output_shape) + self.bias
+        return output.to(orig_dtype)

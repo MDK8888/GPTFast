@@ -1,4 +1,3 @@
-#In order for speculative decoding to work, the vocabulary for two models must be the same, i.e. the dictionary with id keys and string tokens must be the same.
 import types
 import torch
 import torch.nn as nn
@@ -157,16 +156,3 @@ def add_speculative_decoding(model:nn.Module, draft_model:nn.Module) -> nn.Modul
     model.speculative_decode = types.MethodType(speculative_decode_kv_cache, model)
     model.generate = types.MethodType(generate_kv_cache, model)
     return model
-
-
-
-
-    
-    
-    
-
-    
-
-
-
-

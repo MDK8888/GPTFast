@@ -1,6 +1,5 @@
 from typing import Callable, Union, Dict
 import torch
-from transformers import AutoModelForCausalLM
 from GPTFast.Core.KVCache import add_kv_cache
 from GPTFast.Core.Compile import torch_compile_model
 from GPTFast.Core.Decode import add_speculative_decoding

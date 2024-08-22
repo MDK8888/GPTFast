@@ -15,7 +15,6 @@ class KVCacheModel(nn.Module):
         super().__init__()
         self.device = device
         self.sample = types.MethodType(sample_fn, self)
-
         assert not isinstance(model, BloomForCausalLM), "Bloom models currently have an unsupported kv cache shape."
 
         self._model = self.add_static_cache_to_model(model, cache_config, dtype, self.device)
@@ -144,7 +143,7 @@ class KVCacheModel(nn.Module):
         return last_q
 
     @torch.no_grad()
-    def generate(self, prefix:torch.Tensor, gamma:int, **sampling_kwargs) -> torch.Tensor:
+    def generate(self, cur_tokens:torch.Tensor, max_tokens:int, **sampling_kwargs) -> torch.Tensor:
         """ forward the model gamma times
 
         Args:
@@ -154,15 +153,16 @@ class KVCacheModel(nn.Module):
         Returns:
             Torch.Tensor: prefix+generated tokens
         """
-        x = prefix
+        x = cur_tokens
 
         #prefill stage
         last_logits = self.prefill(x)
         last_prob = torch.nn.functional.softmax(last_logits, dim=-1)
         next_tok = self.sample(last_prob, **sampling_kwargs)
         x = torch.cat((x, next_tok), dim=1)
+        length = max_tokens - len(x[0])
 
-        for _ in range(gamma):
+        for _ in range(length):
             last_logits = self.forward(next_tok)
             last_prob = torch.nn.functional.softmax(last_logits, dim=-1)
             next_tok = self.sample(last_prob, **sampling_kwargs)
@@ -178,8 +178,7 @@ class KVCacheModel(nn.Module):
         all_input_ids = torch.empty((INFERENCE_BATCH_SIZE, 0), dtype=torch.long).to(self.device)
 
         for _ in range(length):
-            with torch.no_grad():
-                last_logits = self.forward(uncached_input_ids)
+            last_logits = self.forward(uncached_input_ids)
 
             token_probabilities = torch.nn.functional.softmax(last_logits, dim=-1)
             next_token = self.sample(token_probabilities, **sampling_kwargs)
@@ -194,13 +193,11 @@ class KVCacheModel(nn.Module):
         else:
             return all_probabilities
         
-    @torch.no_grad()
     def rollback_cache(self, last_pos:int) -> None:
         self._cached_len = last_pos
         self._dummy_key_values = self._full_key_values[:, :, :, :, :self._cached_len]
         self._prob_history = self._prob_history[:, :self._cached_len, :]
     
-    @torch.no_grad()
     def clear(self):
         self._dummy_key_values = self._init_key_values
         self._prob_history = self._init_prob_history

@@ -3,3 +3,7 @@ __pycache__
 build
 dist
 gptfast.egg-info
+*pth
+*ncu-rep
+*txt
+*csv
